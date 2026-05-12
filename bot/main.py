@@ -784,12 +784,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------------------------------------------------------------------------
 # Точка входа
 # ---------------------------------------------------------------------------
+async def post_init(app) -> None:
+    """Устанавливает меню команд бота после запуска."""
+    from telegram import BotCommand
+    await app.bot.set_my_commands([
+        BotCommand("start",    "👋 Приветствие и список команд"),
+        BotCommand("history",  "📜 История диалога и управление ей"),
+        BotCommand("settings", "⚙️ Настройки бота"),
+        BotCommand("reset",    "🗑️ Очистить историю диалога"),
+        BotCommand("obzr",     "📖 Режим учебника ОБЖ 8–9 кл."),
+        BotCommand("exit",     "🚪 Выйти из режима учебника"),
+    ])
+    logger.info("Меню команд обновлено.")
+
+
 def main() -> None:
     logger.info("Запуск Telegram-бота...")
     _load_state()
     load_book_pages()
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("reset",    cmd_reset))
