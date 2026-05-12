@@ -903,8 +903,33 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ---------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    user_text = update.message.text
+    user_text = update.message.text or ""
+    chat_type = update.effective_chat.type
     mode = user_mode.get(user_id, "default")
+
+    # В группах — отвечаем только при упоминании @бота или ответе на его сообщение
+    if chat_type in ("group", "supergroup"):
+        bot_username = (context.bot.username or "").lower()
+        msg = update.message
+
+        mentioned = any(
+            msg.text[e.offset: e.offset + e.length].lstrip("@").lower() == bot_username
+            for e in (msg.entities or [])
+            if e.type == "mention"
+        )
+        replying_to_bot = bool(
+            msg.reply_to_message
+            and msg.reply_to_message.from_user
+            and (msg.reply_to_message.from_user.username or "").lower() == bot_username
+        )
+
+        if not mentioned and not replying_to_bot:
+            return
+
+        # Убираем @упоминание из текста перед отправкой в Gemini
+        if bot_username:
+            user_text = re.sub(rf"@{re.escape(bot_username)}", "", user_text, flags=re.IGNORECASE).strip()
+
     relevant_page_nums: list[int] = []
 
     if mode == "obzr":
@@ -1009,8 +1034,14 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_photo))
 
-    # Текст
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Текст: личка — всегда; группы — при упоминании или ответе на бота
+    _group_mention_filter = (
+        filters.ChatType.GROUPS & (filters.Entity("mention") | filters.REPLY)
+    )
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | _group_mention_filter),
+        handle_message,
+    ))
 
     logger.info("Бот запущен.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
