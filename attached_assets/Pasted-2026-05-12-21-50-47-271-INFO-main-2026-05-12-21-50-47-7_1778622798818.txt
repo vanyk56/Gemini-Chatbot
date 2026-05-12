@@ -1,0 +1,78 @@
+2026-05-12 21:50:47,271 [INFO] __main__: Бот запущен.
+2026-05-12 21:50:47,710 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getMe "HTTP/1.1 200 OK"
+2026-05-12 21:50:47,897 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/setMyCommands "HTTP/1.1 200 OK"
+2026-05-12 21:50:47,898 [INFO] __main__: Меню команд обновлено.
+2026-05-12 21:50:47,254 [INFO] __main__: Запуск Telegram-бота...
+2026-05-12 21:50:47,264 [INFO] __main__: Загружено страниц из кэша: 239
+2026-05-12 21:50:48,041 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/deleteWebhook "HTTP/1.1 200 OK"
+2026-05-12 21:50:48,042 [INFO] telegram.ext.Application: Application started
+2026-05-12 21:50:52,624 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 409 Conflict"
+2026-05-12 21:50:52,625 [ERROR] telegram.ext.Application: No error handlers are registered, logging exception.
+Traceback (most recent call last):
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_utils/networkloop.py", line 161, in network_retry_loop
+    await do_action()
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_utils/networkloop.py", line 154, in do_action
+    action_cb_task.result()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_updater.py", line 340, in polling_action_cb
+    updates = await self.bot.get_updates(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_extbot.py", line 672, in get_updates
+    updates = await super().get_updates(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<9 lines>...
+    )
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/_bot.py", line 4865, in get_updates
+    await self._post(
+    ^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ),
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/_bot.py", line 733, in _do_post
+    ^
+    result = await request.post(
+  File "/app/.venv/lib/python3.13/site-packages/telegram/_bot.py", line 704, in _post
+    return await self._do_post(
+             ^^^^^^^^^^^^^^^^^^^
+           ^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    ...<6 lines>...
+    )
+    )
+    ^
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_extbot.py", line 370, in _do_post
+  File "/app/.venv/lib/python3.13/site-packages/telegram/request/_baserequest.py", line 198, in post
+    return await super()._do_post(
+    result = await self._request_wrapper(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    ...<7 lines>...
+    )
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/request/_baserequest.py", line 375, in _request_wrapper
+    raise exception
+telegram.error.Conflict: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+2026-05-12 21:51:03,778 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:51:13,922 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:51:24,068 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:51:33,299 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:51:33,746 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/sendMessageDraft "HTTP/1.1 200 OK"
+2026-05-12 21:51:33,747 [INFO] google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-12 21:51:33,910 [INFO] httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse "HTTP/1.1 404 Not Found"
+2026-05-12 21:51:33,911 [ERROR] __main__: Ошибка Gemini API: 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}
+2026-05-12 21:51:34,401 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/sendMessage "HTTP/1.1 200 OK"
+2026-05-12 21:51:43,458 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:51:53,606 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:52:03,751 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:52:13,897 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:52:24,047 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:52:34,194 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:52:44,340 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
+2026-05-12 21:53:04,635 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/getUpdates "HTTP/1.1 200 OK"
