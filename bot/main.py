@@ -245,8 +245,9 @@ async def native_stream_reply(
                 txt = getattr(chunk, "text", None) or ""
                 if txt:
                     queue.put_nowait(txt)
-        finally:
             queue.put_nowait(None)
+        except Exception as exc:
+            queue.put_nowait(exc)
 
     asyncio.get_running_loop().run_in_executor(None, _produce)
 
@@ -260,6 +261,8 @@ async def native_stream_reply(
             break
         if chunk_text is None:
             break
+        if isinstance(chunk_text, Exception):
+            raise chunk_text
         accumulated += chunk_text
 
         now = time.monotonic()
@@ -991,24 +994,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     add_message(user_id, "user", [{"text": user_text}])
     history = get_history(user_id)
 
+    stream_config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        max_output_tokens=8192,
+    )
     try:
-        stream_iter = gemini_stream(
-            contents=history,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                max_output_tokens=8192,
-            ),
-        )
-        reply_text = await native_stream_reply(
-            update,
-            context.bot.token,
-            stream_iter,
-        )
+        stream_iter = gemini_stream(contents=history, config=stream_config)
+        reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
     except Exception as exc:
-        logger.error("Ошибка Gemini API: %s", exc)
-        get_history(user_id).pop()
-        await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
-        return
+        if _is_quota_error(exc):
+            logger.warning("Квота основной модели исчерпана при стриминге, переключаюсь на %s", MODEL_FALLBACK)
+            try:
+                stream_iter = gemini_stream(contents=history, config=stream_config, model=MODEL_FALLBACK)
+                reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
+            except Exception as exc2:
+                logger.error("Ошибка Gemini API (fallback): %s", exc2)
+                get_history(user_id).pop()
+                await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
+                return
+        else:
+            logger.error("Ошибка Gemini API: %s", exc)
+            get_history(user_id).pop()
+            await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
+            return
 
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
