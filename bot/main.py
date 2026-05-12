@@ -91,29 +91,44 @@ MAX_HISTORY  = 50   # максимум сообщений в памяти
 # ---------------------------------------------------------------------------
 # Вспомогательные функции с автоматическим фоллбэком при превышении квоты
 # ---------------------------------------------------------------------------
+QUOTA_RETRY_DELAYS = [5, 15, 30]  # секунд между попытками при квоте
+
 def _is_quota_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return any(k in msg for k in ("429", "resource_exhausted", "quota", "rate limit", "free_cloud_budget_exceeded"))
 
 def gemini_generate(contents, config: types.GenerateContentConfig, model: str = MODEL):
-    """Вызов generate_content с фоллбэком на резервную модель при квоте."""
-    try:
-        return client.models.generate_content(model=model, contents=contents, config=config)
-    except Exception as exc:
-        if _is_quota_error(exc) and model != MODEL_FALLBACK:
-            logger.warning("Квота модели %s превышена, переключаюсь на %s: %s", model, MODEL_FALLBACK, exc)
-            return client.models.generate_content(model=MODEL_FALLBACK, contents=contents, config=config)
-        raise
+    """Вызов generate_content с повторами и фоллбэком на резервную модель при квоте."""
+    for attempt, delay in enumerate(QUOTA_RETRY_DELAYS + [None]):
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except Exception as exc:
+            if _is_quota_error(exc):
+                if delay is not None:
+                    logger.warning("Квота модели %s превышена, жду %ds (попытка %d)...", model, delay, attempt + 1)
+                    time.sleep(delay)
+                    continue
+                # Все попытки с основной моделью исчерпаны — пробуем фоллбэк
+                if model != MODEL_FALLBACK:
+                    logger.warning("Переключаюсь на резервную модель %s", MODEL_FALLBACK)
+                    return client.models.generate_content(model=MODEL_FALLBACK, contents=contents, config=config)
+            raise
 
 def gemini_stream(contents, config: types.GenerateContentConfig, model: str = MODEL):
-    """Вызов generate_content_stream с фоллбэком на резервную модель при квоте."""
-    try:
-        return client.models.generate_content_stream(model=model, contents=contents, config=config)
-    except Exception as exc:
-        if _is_quota_error(exc) and model != MODEL_FALLBACK:
-            logger.warning("Квота модели %s превышена, переключаюсь на %s: %s", model, MODEL_FALLBACK, exc)
-            return client.models.generate_content_stream(model=MODEL_FALLBACK, contents=contents, config=config)
-        raise
+    """Вызов generate_content_stream с повторами и фоллбэком на резервную модель при квоте."""
+    for attempt, delay in enumerate(QUOTA_RETRY_DELAYS + [None]):
+        try:
+            return client.models.generate_content_stream(model=model, contents=contents, config=config)
+        except Exception as exc:
+            if _is_quota_error(exc):
+                if delay is not None:
+                    logger.warning("Квота модели %s превышена, жду %ds (попытка %d)...", model, delay, attempt + 1)
+                    time.sleep(delay)
+                    continue
+                if model != MODEL_FALLBACK:
+                    logger.warning("Переключаюсь на резервную модель %s", MODEL_FALLBACK)
+                    return client.models.generate_content_stream(model=MODEL_FALLBACK, contents=contents, config=config)
+            raise
 
 # ---------------------------------------------------------------------------
 # LaTeX → читаемый текст
