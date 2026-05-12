@@ -162,8 +162,9 @@ async def send_reply(update: Update, text: str, business_connection_id: str | No
 # ---------------------------------------------------------------------------
 # Состояние пользователей (история + режим + настройки)
 # ---------------------------------------------------------------------------
-USER_MODE_FILE     = Path("bot/user_modes.json")
-USER_SETTINGS_FILE = Path("bot/user_settings.json")
+USER_MODE_FILE        = Path("bot/user_modes.json")
+USER_SETTINGS_FILE    = Path("bot/user_settings.json")
+BUSINESS_CONN_FILE    = Path("bot/business_connections.json")
 
 conversation_history: dict[int, list]          = {}
 conversation_timestamps: dict[int, list[str]]  = {}
@@ -172,7 +173,7 @@ user_settings: dict[int, dict]                  = {}
 business_connections: dict[str, int]            = {}  # conn_id → user_id
 
 def _load_state() -> None:
-    global user_mode, user_settings
+    global user_mode, user_settings, business_connections
     if USER_MODE_FILE.exists():
         try:
             data = json.loads(USER_MODE_FILE.read_text(encoding="utf-8"))
@@ -185,6 +186,22 @@ def _load_state() -> None:
             user_settings = {int(k): v for k, v in data.items()}
         except Exception as e:
             logger.warning("Не удалось загрузить настройки: %s", e)
+    if BUSINESS_CONN_FILE.exists():
+        try:
+            data = json.loads(BUSINESS_CONN_FILE.read_text(encoding="utf-8"))
+            business_connections = {k: int(v) for k, v in data.items()}
+            logger.info("Загружено бизнес-подключений: %d", len(business_connections))
+        except Exception as e:
+            logger.warning("Не удалось загрузить бизнес-подключения: %s", e)
+
+def _save_business_connections() -> None:
+    try:
+        BUSINESS_CONN_FILE.write_text(
+            json.dumps(business_connections, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("Не удалось сохранить бизнес-подключения: %s", e)
 
 def _save_modes() -> None:
     try:
@@ -566,8 +583,8 @@ async def handle_business_connection(update: Update, context: ContextTypes.DEFAU
 
     if conn.is_enabled:
         business_connections[conn.id] = user_id
+        _save_business_connections()
         logger.info("Business подключение: user=%d conn_id=%s", user_id, conn.id)
-        # Уведомляем владельца в личку
         try:
             await context.bot.send_message(
                 chat_id=user_id,
@@ -583,6 +600,7 @@ async def handle_business_connection(update: Update, context: ContextTypes.DEFAU
             logger.warning("Не удалось отправить уведомление: %s", e)
     else:
         business_connections.pop(conn.id, None)
+        _save_business_connections()
         logger.info("Business отключено: user=%d conn_id=%s", user_id, conn.id)
         try:
             await context.bot.send_message(
@@ -603,9 +621,17 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
     conn_id = msg.business_connection_id
     owner_id = business_connections.get(conn_id)
 
+    # Если подключение не в памяти (бот перезапустился) — запросим у Telegram API
     if owner_id is None:
-        logger.warning("Business сообщение без известного подключения: %s", conn_id)
-        return
+        try:
+            conn = await context.bot.get_business_connection(conn_id)
+            owner_id = conn.user.id
+            business_connections[conn_id] = owner_id
+            _save_business_connections()
+            logger.info("Восстановлено business подключение: user=%d conn_id=%s", owner_id, conn_id)
+        except Exception as e:
+            logger.warning("Не удалось получить business подключение %s: %s", conn_id, e)
+            return
 
     settings = get_settings(owner_id)
     if not settings.get("auto_reply", True):
