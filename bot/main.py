@@ -18,6 +18,8 @@ Telegram-бот с ИИ на базе Google Gemini.
 import os
 import re
 import json
+import time
+import asyncio
 import logging
 import tempfile
 import base64
@@ -161,6 +163,95 @@ async def send_reply(update: Update, text: str, business_connection_id: str | No
             await update.message.reply_text(part, **kwargs)
         except Exception:
             await update.message.reply_text(part)
+
+# ---------------------------------------------------------------------------
+# Нативный стриминг через Telegram Bot API sendMessageDraft
+# ---------------------------------------------------------------------------
+_draft_counter = 0
+
+def _next_draft_id() -> int:
+    global _draft_counter
+    _draft_counter = (_draft_counter % 2_000_000_000) + 1
+    return _draft_counter
+
+async def _send_draft(token: str, chat_id: int | str, draft_id: int, text: str) -> None:
+    """Вызывает sendMessageDraft через raw Bot API (метод не поддерживается PTB 22.7)."""
+    import httpx
+    url = f"https://api.telegram.org/bot{token}/sendMessageDraft"
+    payload: dict = {"chat_id": chat_id, "draft_id": draft_id}
+    if text:
+        payload["text"] = text
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            await c.post(url, json=payload)
+    except Exception as e:
+        logger.debug("sendMessageDraft error: %s", e)
+
+DRAFT_UPDATE_INTERVAL = 1.0   # секунд между обновлениями черновика
+DRAFT_MIN_CHARS       = 20    # минимум символов перед первым обновлением
+
+async def native_stream_reply(
+    update: Update,
+    token: str,
+    stream_iter,
+    *,
+    reply_to_message_id: int | None = None,
+) -> str:
+    """
+    Нативный стриминг:
+      1. sendMessageDraft → анимированный черновик (Thinking... / текст по мере генерации)
+      2. sendMessage      → финальное сообщение (черновик исчезает сам)
+    Возвращает полный сырой текст.
+    """
+    chat_id  = update.effective_chat.id
+    draft_id = _next_draft_id()
+
+    # Показываем "Thinking..." (пустой text = стандартный плейсхолдер Telegram)
+    await _send_draft(token, chat_id, draft_id, "")
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _produce() -> None:
+        try:
+            for chunk in stream_iter:
+                txt = getattr(chunk, "text", None) or ""
+                if txt:
+                    queue.put_nowait(txt)
+        finally:
+            queue.put_nowait(None)
+
+    asyncio.get_running_loop().run_in_executor(None, _produce)
+
+    accumulated = ""
+    last_update  = 0.0
+
+    while True:
+        try:
+            chunk_text = await asyncio.wait_for(queue.get(), timeout=30.0)
+        except asyncio.TimeoutError:
+            break
+        if chunk_text is None:
+            break
+        accumulated += chunk_text
+
+        now = time.monotonic()
+        if now - last_update >= DRAFT_UPDATE_INTERVAL and len(accumulated) >= DRAFT_MIN_CHARS:
+            await _send_draft(token, chat_id, draft_id, latex_to_text(accumulated))
+            last_update = now
+
+    # Финальное сообщение — персистентное; черновик исчезает автоматически
+    if accumulated:
+        final_html = md_to_html(accumulated)
+        for part in split_message(final_html):
+            kwargs: dict = {"parse_mode": ParseMode.HTML}
+            if reply_to_message_id:
+                kwargs["reply_to_message_id"] = reply_to_message_id
+            try:
+                await update.message.reply_text(part, **kwargs)
+            except Exception:
+                await update.message.reply_text(part)
+
+    return accumulated
 
 # ---------------------------------------------------------------------------
 # Состояние пользователей (история + режим + настройки)
@@ -874,10 +965,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     add_message(user_id, "user", [{"text": user_text}])
     history = get_history(user_id)
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
     try:
-        response = client.models.generate_content(
+        stream_iter = client.models.generate_content_stream(
             model=MODEL,
             contents=history,
             config=types.GenerateContentConfig(
@@ -885,15 +974,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 max_output_tokens=8192,
             ),
         )
-        reply_text = response.text
+        reply_text = await native_stream_reply(
+            update,
+            context.bot.token,
+            stream_iter,
+        )
     except Exception as exc:
         logger.error("Ошибка Gemini API: %s", exc)
         get_history(user_id).pop()
         await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
         return
 
-    add_message(user_id, "model", [{"text": reply_text}])
-    await send_reply(update, reply_text)
+    if reply_text:
+        add_message(user_id, "model", [{"text": reply_text}])
 
     if mode == "obzr" and relevant_page_nums:
         img_path = get_page_image(relevant_page_nums[0])
