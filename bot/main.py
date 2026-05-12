@@ -32,6 +32,8 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -40,6 +42,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     BusinessConnectionHandler,
+    InlineQueryHandler,
     ContextTypes,
     filters,
 )
@@ -990,6 +993,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.warning("Не удалось отправить страницу: %s", e)
 
 # ---------------------------------------------------------------------------
+# Инлайн-режим: @бот вопрос — в любом чате без добавления бота
+# ---------------------------------------------------------------------------
+INLINE_CACHE_TIME = 0  # секунд (0 = не кешировать, у каждого свой ответ)
+
+async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.inline_query
+    user_text = (query.query or "").strip()
+
+    if not user_text:
+        await query.answer(
+            results=[],
+            switch_pm_text="Напиши вопрос после @имени бота",
+            switch_pm_parameter="start",
+            cache_time=INLINE_CACHE_TIME,
+        )
+        return
+
+    logger.info("Инлайн-запрос от user=%d: %s", query.from_user.id, user_text[:60])
+
+    try:
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=[{"role": "user", "parts": [{"text": user_text}]}],
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT_DEFAULT,
+                max_output_tokens=2048,
+            ),
+        )
+        answer_raw = response.text or "Не удалось получить ответ."
+    except Exception as exc:
+        logger.error("Ошибка Gemini (inline): %s", exc)
+        answer_raw = "⚠️ Ошибка при обращении к ИИ. Попробуй ещё раз."
+
+    answer_html = md_to_html(answer_raw)
+    # Telegram inline: максимум 4096 символов в тексте результата
+    short_preview = answer_raw[:120].replace("\n", " ") + ("…" if len(answer_raw) > 120 else "")
+
+    import hashlib
+    result_id = hashlib.md5(f"{query.from_user.id}:{user_text}".encode()).hexdigest()[:16]
+
+    result = InlineQueryResultArticle(
+        id=result_id,
+        title=f"💬 {user_text[:50]}",
+        description=short_preview,
+        input_message_content=InputTextMessageContent(
+            message_text=answer_html,
+            parse_mode=ParseMode.HTML,
+        ),
+    )
+
+    await query.answer(
+        results=[result],
+        cache_time=INLINE_CACHE_TIME,
+        is_personal=True,
+    )
+
+# ---------------------------------------------------------------------------
 # Точка входа
 # ---------------------------------------------------------------------------
 async def post_init(app) -> None:
@@ -1025,6 +1085,9 @@ def main() -> None:
 
     # Inline-кнопки
     app.add_handler(CallbackQueryHandler(handle_callback))
+
+    # Инлайн-режим (без добавления бота в чат)
+    app.add_handler(InlineQueryHandler(handle_inline))
 
     # Business Bot
     app.add_handler(BusinessConnectionHandler(handle_business_connection))
