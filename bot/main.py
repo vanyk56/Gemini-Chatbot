@@ -18,6 +18,8 @@ Telegram-бот с ИИ на базе Google Gemini.
 import os
 import re
 import json
+import time
+import asyncio
 import logging
 import tempfile
 import base64
@@ -158,6 +160,81 @@ async def send_reply(update: Update, text: str, business_connection_id: str | No
             await update.message.reply_text(part, **kwargs)
         except Exception:
             await update.message.reply_text(part)
+
+# ---------------------------------------------------------------------------
+# Стриминг ответа Gemini с обновлением сообщения в реальном времени
+# ---------------------------------------------------------------------------
+STREAM_INTERVAL = 1.5   # секунды между редактированиями Telegram
+STREAM_MIN_LEN  = 30    # минимум символов накоплено перед первым обновлением
+
+async def stream_gemini(
+    stream_iter,
+    placeholder_msg,
+    *,
+    business_connection_id: str | None = None,
+) -> str:
+    """
+    Принимает синхронный итератор чанков Gemini, обновляет placeholder_msg
+    каждые STREAM_INTERVAL секунд с курсором ▌, финальный ответ — с HTML.
+    Возвращает полный сырой текст ответа.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _produce() -> None:
+        try:
+            for chunk in stream_iter:
+                txt = getattr(chunk, "text", None) or ""
+                if txt:
+                    queue.put_nowait(txt)
+        finally:
+            queue.put_nowait(None)  # sentinel
+
+    asyncio.get_running_loop().run_in_executor(None, _produce)
+
+    accumulated = ""
+    last_edit    = 0.0
+
+    while True:
+        try:
+            chunk_text = await asyncio.wait_for(queue.get(), timeout=30.0)
+        except asyncio.TimeoutError:
+            break
+        if chunk_text is None:
+            break
+        accumulated += chunk_text
+
+        now = time.monotonic()
+        if now - last_edit >= STREAM_INTERVAL and len(accumulated) >= STREAM_MIN_LEN:
+            try:
+                plain = latex_to_text(accumulated)
+                await placeholder_msg.edit_text(plain + " ▌")
+                last_edit = now
+            except Exception:
+                pass
+
+    # финальное обновление с форматированием
+    if accumulated:
+        final_html = md_to_html(accumulated)
+        parts = split_message(final_html)
+        for i, part in enumerate(parts):
+            kwargs: dict = {"parse_mode": ParseMode.HTML}
+            if business_connection_id:
+                kwargs["business_connection_id"] = business_connection_id
+            try:
+                if i == 0:
+                    await placeholder_msg.edit_text(part, **kwargs)
+                else:
+                    await placeholder_msg.reply_text(part, **kwargs)
+            except Exception:
+                try:
+                    if i == 0:
+                        await placeholder_msg.edit_text(part)
+                    else:
+                        await placeholder_msg.reply_text(part)
+                except Exception:
+                    pass
+
+    return accumulated
 
 # ---------------------------------------------------------------------------
 # Состояние пользователей (история + режим + настройки)
@@ -728,9 +805,16 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
     biz_history = conversation_history.setdefault(key, [])
     biz_history.append({"role": "user", "parts": [{"text": msg.text}]})
 
+    # Отправляем плейсхолдер — он будет обновляться потоком
+    placeholder = await context.bot.send_message(
+        chat_id=msg.chat.id,
+        text="…",
+        business_connection_id=conn_id,
+    )
+
     try:
         persona = get_settings(owner_id).get("persona", "")
-        response = client.models.generate_content(
+        stream_iter = client.models.generate_content_stream(
             model=MODEL,
             contents=biz_history,
             config=types.GenerateContentConfig(
@@ -738,27 +822,24 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                 max_output_tokens=1024,
             ),
         )
-        reply_text = response.text
+        reply_text = await stream_gemini(
+            stream_iter,
+            placeholder,
+            business_connection_id=conn_id,
+        )
     except Exception as exc:
         logger.error("Ошибка Gemini (business): %s", exc)
+        try:
+            await placeholder.edit_text("…")
+        except Exception:
+            pass
         return
 
-    biz_history.append({"role": "model", "parts": [{"text": reply_text}]})
+    if reply_text:
+        biz_history.append({"role": "model", "parts": [{"text": reply_text}]})
     # Обрезаем историю бизнес-чата
     if len(biz_history) > 40:
         conversation_history[key] = biz_history[-40:]
-
-    formatted = md_to_html(reply_text)
-    for part in split_message(formatted):
-        try:
-            await context.bot.send_message(
-                chat_id=msg.chat.id,
-                text=part,
-                parse_mode=ParseMode.HTML,
-                business_connection_id=conn_id,
-            )
-        except Exception as e:
-            logger.error("Ошибка отправки business-ответа: %s", e)
 
 # ---------------------------------------------------------------------------
 # Обработка изображений
@@ -847,9 +928,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history = get_history(user_id)
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    placeholder = await update.message.reply_text("…")
 
     try:
-        response = client.models.generate_content(
+        stream_iter = client.models.generate_content_stream(
             model=MODEL,
             contents=history,
             config=types.GenerateContentConfig(
@@ -857,15 +939,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 max_output_tokens=8192,
             ),
         )
-        reply_text = response.text
+        reply_text = await stream_gemini(stream_iter, placeholder)
     except Exception as exc:
         logger.error("Ошибка Gemini API: %s", exc)
         get_history(user_id).pop()
-        await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
+        try:
+            await placeholder.edit_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
+        except Exception:
+            pass
         return
 
     add_message(user_id, "model", [{"text": reply_text}])
-    await send_reply(update, reply_text)
 
     if mode == "obzr" and relevant_page_nums:
         img_path = get_page_image(relevant_page_nums[0])
