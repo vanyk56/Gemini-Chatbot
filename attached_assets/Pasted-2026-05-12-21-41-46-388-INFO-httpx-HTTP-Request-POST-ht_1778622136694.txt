@@ -1,0 +1,50 @@
+2026-05-12 21:41:46,388 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/setMyCommands "HTTP/1.1 200 OK"
+2026-05-12 21:41:46,389 [INFO] __main__: Меню команд обновлено.
+2026-05-12 21:41:46,535 [INFO] httpx: HTTP Request: POST https://api.telegram.org/bot7923705241:AAG9qVZm_CSNWy3ZE7vp83mdaNihlJJ676g/deleteWebhook "HTTP/1.1 200 OK"
+2026-05-12 21:41:46,536 [INFO] telegram.ext.Application: Application started
+2026-05-12 21:41:51,119 [ERROR] telegram.ext.Application: No error handlers are registered, logging exception.
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+Traceback (most recent call last):
+    ...<9 lines>...
+    )
+    await do_action()
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_utils/networkloop.py", line 154, in do_action
+  File "/app/.venv/lib/python3.13/site-packages/telegram/_bot.py", line 4865, in get_updates
+    action_cb_task.result()
+    await self._post(
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_updater.py", line 340, in polling_action_cb
+    ^^^^^^^^^^^^^^^^^
+    updates = await self.bot.get_updates(
+    ...<7 lines>...
+    )
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_extbot.py", line 672, in get_updates
+    updates = await super().get_updates(
+    ),
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/_bot.py", line 704, in _post
+  File "/app/.venv/lib/python3.13/site-packages/telegram/request/_baserequest.py", line 375, in _request_wrapper
+    return await self._do_post(
+           ^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/telegram/ext/_extbot.py", line 370, in _do_post
+           ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+    result = await request.post(
+             ^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+    result = await self._request_wrapper(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+    raise exception
+telegram.error.Conflict: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
