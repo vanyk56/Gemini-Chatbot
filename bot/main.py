@@ -1,16 +1,18 @@
 """
-Telegram-бот с ИИ на базе Google Gemini (через Replit AI Integrations).
+Telegram-бот с ИИ на базе Google Gemini.
 
-Секреты (Replit Secrets):
+Секреты:
   - TELEGRAM_BOT_TOKEN       — токен бота от @BotFather
-  - AI_INTEGRATIONS_GEMINI_BASE_URL / AI_INTEGRATIONS_GEMINI_API_KEY
-    настраиваются автоматически через Replit Gemini Integration
+  - GEMINI_API_KEY           — ключ Google AI Studio
+  - AI_INTEGRATIONS_GEMINI_BASE_URL / AI_INTEGRATIONS_GEMINI_API_KEY (Replit proxy)
 
 Команды:
-  /start  — приветствие
-  /reset  — очистить историю диалога
-  /OBZR   — включить режим строгих ответов по учебнику ОБЖ 8–9 кл.
-  /exit   — выйти из режима учебника
+  /start    — приветствие
+  /reset    — очистить историю диалога
+  /history  — просмотр и управление историей
+  /settings — настройки бота
+  /OBZR     — режим учебника ОБЖ 8–9 кл.
+  /exit     — выйти из режима учебника
 """
 
 import os
@@ -18,16 +20,24 @@ import re
 import json
 import logging
 import tempfile
+import base64
 from pathlib import Path
+from datetime import datetime
 
 from google import genai
 from google.genai import types
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
+    BusinessConnectionHandler,
     ContextTypes,
     filters,
 )
@@ -42,7 +52,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Токены
+# Токены / клиент
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -54,169 +64,184 @@ if not TELEGRAM_BOT_TOKEN:
     raise EnvironmentError("TELEGRAM_BOT_TOKEN не задан!")
 
 if _REPLIT_BASE_URL and _REPLIT_API_KEY:
-    _gemini_api_key  = _REPLIT_API_KEY
-    _gemini_base_url = _REPLIT_BASE_URL
-    _use_proxy = True
+    client = genai.Client(
+        api_key=_REPLIT_API_KEY,
+        http_options=types.HttpOptions(base_url=_REPLIT_BASE_URL, api_version=""),
+    )
 elif _DIRECT_API_KEY:
-    _gemini_api_key  = _DIRECT_API_KEY
-    _gemini_base_url = None
-    _use_proxy = False
+    client = genai.Client(api_key=_DIRECT_API_KEY)
 else:
     raise EnvironmentError(
-        "Нужен GEMINI_API_KEY (Railway) "
-        "или AI_INTEGRATIONS_GEMINI_BASE_URL + AI_INTEGRATIONS_GEMINI_API_KEY (Replit)."
+        "Нужен GEMINI_API_KEY или AI_INTEGRATIONS_GEMINI_BASE_URL + AI_INTEGRATIONS_GEMINI_API_KEY"
     )
 
-# ---------------------------------------------------------------------------
-# Gemini клиент
-# ---------------------------------------------------------------------------
-if _use_proxy:
-    client = genai.Client(
-        api_key=_gemini_api_key,
-        http_options=types.HttpOptions(
-            base_url=_gemini_base_url,
-            api_version="",
-        ),
-    )
-else:
-    client = genai.Client(api_key=_gemini_api_key)
-
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-PAGES_DIR = Path("bot/books/pages")
-BOOK_PATH = Path("bot/books/obzr.txt")
+MODEL        = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+PAGES_DIR    = Path("bot/books/pages")
+BOOK_PATH    = Path("bot/books/obzr.txt")
 PROGRESS_PATH = Path("bot/books/progress.txt")
-MAX_MSG_LEN = 4000
+MAX_MSG_LEN  = 4000
+MAX_HISTORY  = 50   # максимум сообщений в памяти
 
 # ---------------------------------------------------------------------------
-# Конвертер LaTeX → читаемый текст для Telegram
+# LaTeX → читаемый текст
 # ---------------------------------------------------------------------------
 def latex_to_text(text: str) -> str:
-    """Конвертирует LaTeX математику в читаемый Unicode-текст."""
-
-    def convert_frac(m: re.Match) -> str:
-        num = m.group(1).strip()
-        den = m.group(2).strip()
-        return f"{num}/{den}"
-
-    def convert_sqrt(m: re.Match) -> str:
-        inner = m.group(1).strip()
-        return f"√({inner})"
-
-    def convert_mixed(text: str) -> str:
+    def convert_mixed(t: str) -> str:
         return re.sub(
             r"(\d+)\s+\\frac\{([^}]+)\}\{([^}]+)\}",
             lambda m: f"{m.group(1)} {m.group(2)}/{m.group(3)}",
-            text,
+            t,
         )
 
-    # Блочные формулы $$...$$
     text = re.sub(r"\$\$(.+?)\$\$", lambda m: m.group(1).strip(), text, flags=re.DOTALL)
-
-    # Смешанные числа вида "3 \frac{6}{13}" → "3 6/13" (до обработки \frac)
     text = convert_mixed(text)
+    text = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", lambda m: f"{m.group(1).strip()}/{m.group(2).strip()}", text)
+    text = re.sub(r"\\sqrt\{([^}]+)\}", lambda m: f"√({m.group(1).strip()})", text)
 
-    # \frac{a}{b} → a/b
-    text = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", convert_frac, text)
-
-    # \sqrt{x} → √(x)
-    text = re.sub(r"\\sqrt\{([^}]+)\}", convert_sqrt, text)
-
-    # Операторы и символы
     replacements = [
-        (r"\\times", "×"),
-        (r"\\cdot", "·"),
-        (r"\\div", "÷"),
-        (r"\\pm", "±"),
-        (r"\\leq", "≤"),
-        (r"\\geq", "≥"),
-        (r"\\neq", "≠"),
-        (r"\\approx", "≈"),
-        (r"\\infty", "∞"),
-        (r"\\in", "∈"),
-        (r"\\notin", "∉"),
-        (r"\\subset", "⊂"),
-        (r"\\cup", "∪"),
-        (r"\\cap", "∩"),
-        (r"\\alpha", "α"),
-        (r"\\beta", "β"),
-        (r"\\gamma", "γ"),
-        (r"\\pi", "π"),
-        (r"\\left\(", "("),
-        (r"\\right\)", ")"),
-        (r"\\left\[", "["),
-        (r"\\right\]", "]"),
-        (r"\\left\\{", "{"),
-        (r"\\right\\}", "}"),
-        (r"\\,", " "),
-        (r"\\;", " "),
-        (r"\\!", ""),
-        (r"\\quad", "  "),
-        (r"\\qquad", "    "),
-        (r"\\ldots", "..."),
-        (r"\\cdots", "..."),
+        (r"\\times", "×"), (r"\\cdot", "·"), (r"\\div", "÷"),
+        (r"\\pm", "±"), (r"\\leq", "≤"), (r"\\geq", "≥"),
+        (r"\\neq", "≠"), (r"\\approx", "≈"), (r"\\infty", "∞"),
+        (r"\\alpha", "α"), (r"\\beta", "β"), (r"\\gamma", "γ"), (r"\\pi", "π"),
+        (r"\\left\(", "("), (r"\\right\)", ")"),
+        (r"\\left\[", "["), (r"\\right\]", "]"),
+        (r"\\,", " "), (r"\\;", " "), (r"\\!", ""),
+        (r"\\quad", "  "), (r"\\qquad", "    "),
+        (r"\\ldots", "..."), (r"\\cdots", "..."),
     ]
     for pattern, repl in replacements:
         text = re.sub(pattern, repl, text)
 
-    # Надстрочные индексы ^{...} → (...)
     text = re.sub(r"\^\{([^}]+)\}", lambda m: f"^{m.group(1)}", text)
-    text = re.sub(r"\^(\w)", r"^\1", text)
-
-    # Подстрочные индексы _{...} → нижний текст
     text = re.sub(r"_\{([^}]+)\}", lambda m: f"_{m.group(1)}", text)
-
-    # Удаляем оставшиеся { } и одиночные \
     text = re.sub(r"\\[a-zA-Z]+", "", text)
     text = re.sub(r"[{}]", "", text)
-
-    # Убираем $ вокруг формул (inline $...$)
-    text = re.sub(r"\$([^$]+)\$", lambda m: m.group(1).strip(), text)
-
+    text = re.sub(r"\$([^$\n]+)\$", lambda m: m.group(1).strip(), text)
     return text
 
 # ---------------------------------------------------------------------------
-# Форматирование: Markdown → HTML для Telegram
+# Markdown → HTML для Telegram
 # ---------------------------------------------------------------------------
 def md_to_html(text: str) -> str:
-    # Сначала конвертируем LaTeX в читаемый текст
     text = latex_to_text(text)
-
     text = re.sub(r"^#{1,3}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__",     r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
-    text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)",       r"<i>\1</i>", text)
     text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
     return text
 
 def split_message(text: str, max_len: int = MAX_MSG_LEN) -> list[str]:
     if len(text) <= max_len:
         return [text]
-    parts = []
-    current = ""
+    parts, current = [], ""
     for paragraph in text.split("\n\n"):
         if len(current) + len(paragraph) + 2 <= max_len:
             current += ("" if not current else "\n\n") + paragraph
         else:
             if current:
                 parts.append(current)
-            if len(paragraph) > max_len:
-                lines = paragraph.split("\n")
-                for line in lines:
-                    if len(current) + len(line) + 1 <= max_len:
-                        current += ("" if not current else "\n") + line
-                    else:
-                        if current:
-                            parts.append(current)
-                        current = line
-            else:
-                current = paragraph
+            current = paragraph
     if current:
         parts.append(current)
     return parts or [text[:max_len]]
 
+async def send_reply(update: Update, text: str, business_connection_id: str | None = None) -> None:
+    formatted = md_to_html(text)
+    parts = split_message(formatted)
+    for part in parts:
+        kwargs: dict = {"parse_mode": ParseMode.HTML}
+        if business_connection_id:
+            kwargs["business_connection_id"] = business_connection_id
+        try:
+            await update.message.reply_text(part, **kwargs)
+        except Exception:
+            await update.message.reply_text(part)
+
 # ---------------------------------------------------------------------------
-# Вспомогательные функции учебника
+# Состояние пользователей (история + режим + настройки)
+# ---------------------------------------------------------------------------
+USER_MODE_FILE     = Path("bot/user_modes.json")
+USER_SETTINGS_FILE = Path("bot/user_settings.json")
+
+conversation_history: dict[int, list]          = {}
+conversation_timestamps: dict[int, list[str]]  = {}
+user_mode: dict[int, str]                       = {}
+user_settings: dict[int, dict]                  = {}
+business_connections: dict[str, int]            = {}  # conn_id → user_id
+
+def _load_state() -> None:
+    global user_mode, user_settings
+    if USER_MODE_FILE.exists():
+        try:
+            data = json.loads(USER_MODE_FILE.read_text(encoding="utf-8"))
+            user_mode = {int(k): v for k, v in data.items()}
+        except Exception as e:
+            logger.warning("Не удалось загрузить режимы: %s", e)
+    if USER_SETTINGS_FILE.exists():
+        try:
+            data = json.loads(USER_SETTINGS_FILE.read_text(encoding="utf-8"))
+            user_settings = {int(k): v for k, v in data.items()}
+        except Exception as e:
+            logger.warning("Не удалось загрузить настройки: %s", e)
+
+def _save_modes() -> None:
+    try:
+        USER_MODE_FILE.write_text(
+            json.dumps({str(k): v for k, v in user_mode.items()}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("Не удалось сохранить режимы: %s", e)
+
+def _save_settings() -> None:
+    try:
+        USER_SETTINGS_FILE.write_text(
+            json.dumps({str(k): v for k, v in user_settings.items()}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("Не удалось сохранить настройки: %s", e)
+
+def get_settings(user_id: int) -> dict:
+    return user_settings.setdefault(user_id, {
+        "auto_reply": True,
+        "max_history": 20,
+        "language": "auto",
+    })
+
+def set_user_mode(user_id: int, mode: str) -> None:
+    user_mode[user_id] = mode
+    _save_modes()
+
+def get_history(user_id: int) -> list:
+    return conversation_history.setdefault(user_id, [])
+
+def get_timestamps(user_id: int) -> list:
+    return conversation_timestamps.setdefault(user_id, [])
+
+def add_message(user_id: int, role: str, parts_data: list) -> None:
+    settings = get_settings(user_id)
+    max_h = settings.get("max_history", 20)
+    history = get_history(user_id)
+    timestamps = get_timestamps(user_id)
+    history.append({"role": role, "parts": parts_data})
+    timestamps.append(datetime.now().strftime("%H:%M"))
+    # Обрезаем историю если превышен лимит (попарно user+model)
+    while len(history) > max_h * 2:
+        history.pop(0)
+        if timestamps:
+            timestamps.pop(0)
+
+def clear_user(user_id: int) -> None:
+    conversation_history.pop(user_id, None)
+    conversation_timestamps.pop(user_id, None)
+    user_mode.pop(user_id, None)
+    _save_modes()
+
+# ---------------------------------------------------------------------------
+# Учебник ОБЖ
 # ---------------------------------------------------------------------------
 def load_book_text() -> str:
     if BOOK_PATH.exists():
@@ -248,14 +273,14 @@ def load_book_pages() -> dict[int, str]:
     return _book_pages
 
 _STOP_WORDS = {
-    "что", "как", "это", "так", "еще", "ещё", "уже", "вот", "или", "при", "для", "все",
-    "того", "этот", "эта", "эти", "этого", "этой", "такой", "такое", "такая", "такие",
-    "были", "была", "было", "быть", "есть", "нет", "если", "можно", "нужно", "надо",
-    "который", "которые", "которая", "которого", "которой", "которую", "которым",
-    "чтобы", "когда", "тогда", "после", "более", "очень", "какой", "какие", "между",
-    "также", "самый", "самая", "самое", "самые", "него", "нему", "ними", "них",
-    "своей", "своего", "своих", "своим", "свою", "свои", "меня", "тебя", "себя",
-    "мне", "тебе", "себе", "они", "она", "оно", "они", "нас", "вас", "про",
+    "что","как","это","так","еще","ещё","уже","вот","или","при","для","все",
+    "того","этот","эта","эти","этого","этой","такой","такое","такая","такие",
+    "были","была","было","быть","есть","нет","если","можно","нужно","надо",
+    "который","которые","которая","которого","которой","которую","которым",
+    "чтобы","когда","тогда","после","более","очень","какой","какие","между",
+    "также","самый","самая","самое","самые","него","нему","ними","них",
+    "своей","своего","своих","своим","свою","свои","меня","тебя","себя",
+    "мне","тебе","себе","они","она","оно","нас","вас","про",
 }
 
 def search_relevant_pages(question: str, pages: dict[int, str], top_n: int = 4) -> list[int]:
@@ -267,28 +292,18 @@ def search_relevant_pages(question: str, pages: dict[int, str], top_n: int = 4) 
         return []
     scores: dict[int, float] = {}
     for page_num, text in pages.items():
-        text_lower = text.lower()
-        score = sum(text_lower.count(w) * (len(w) ** 2) for w in words)
+        score = sum(text.lower().count(w) * (len(w) ** 2) for w in words)
         if score > 0:
             scores[page_num] = score
-    ranked = sorted(scores, key=lambda p: scores[p], reverse=True)
-    return ranked[:top_n]
+    return sorted(scores, key=lambda p: scores[p], reverse=True)[:top_n]
 
 def build_obzr_prompt(relevant_pages: dict[int, str]) -> str:
-    pages_text = "\n\n".join(
-        f"[Стр. {num}]\n{text}" for num, text in sorted(relevant_pages.items())
-    )
+    pages_text = "\n\n".join(f"[Стр. {n}]\n{t}" for n, t in sorted(relevant_pages.items()))
     return (
         "Ты — строгий ассистент по ОБЖ (Основы безопасности жизнедеятельности).\n"
-        "Ниже приведены КОНКРЕТНЫЕ СТРАНИЦЫ учебника ОБЖ 8–9 класс.\n"
-        "Отвечай ИСКЛЮЧИТЕЛЬНО по тексту этих страниц — дословно, без домыслов.\n"
-        "НЕ добавляй факты из своих знаний. НЕ используй английские термины если их нет в тексте.\n"
-        "Если информации недостаточно — скажи об этом прямо.\n"
-        "Ответ должен быть КРАТКИМ — максимум 150 слов. Только суть из учебника.\n"
-        "Структура: определение → краткий перечень ключевых пунктов.\n\n"
-        "=== ТЕКСТ СТРАНИЦ УЧЕБНИКА ===\n"
-        f"{pages_text}\n"
-        "=== КОНЕЦ ==="
+        "Отвечай ИСКЛЮЧИТЕЛЬНО по тексту страниц учебника ниже.\n"
+        "НЕ добавляй факты из своих знаний. Ответ — максимум 150 слов.\n\n"
+        "=== СТРАНИЦЫ УЧЕБНИКА ===\n" + pages_text + "\n=== КОНЕЦ ==="
     )
 
 def get_page_image(page_num: int) -> Path | None:
@@ -296,85 +311,32 @@ def get_page_image(page_num: int) -> Path | None:
     return path if path.exists() else None
 
 # ---------------------------------------------------------------------------
-# Отправка ответа с HTML и разбивкой
-# ---------------------------------------------------------------------------
-async def send_reply(update: Update, text: str) -> None:
-    formatted = md_to_html(text)
-    parts = split_message(formatted)
-    for part in parts:
-        try:
-            await update.message.reply_text(part, parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text(part)
-
-# ---------------------------------------------------------------------------
-# Состояние пользователей
-# ---------------------------------------------------------------------------
-USER_MODE_FILE = Path("bot/user_modes.json")
-
-conversation_history: dict[int, list] = {}
-user_mode: dict[int, str] = {}
-
-def _load_user_modes() -> None:
-    global user_mode
-    if USER_MODE_FILE.exists():
-        try:
-            data = json.loads(USER_MODE_FILE.read_text(encoding="utf-8"))
-            user_mode = {int(k): v for k, v in data.items()}
-            logger.info("Загружены режимы %d пользователей", len(user_mode))
-        except Exception as e:
-            logger.warning("Не удалось загрузить режимы: %s", e)
-            user_mode = {}
-
-def _save_user_modes() -> None:
-    try:
-        USER_MODE_FILE.write_text(
-            json.dumps({str(k): v for k, v in user_mode.items()}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception as e:
-        logger.warning("Не удалось сохранить режимы: %s", e)
-
-def set_user_mode(user_id: int, mode: str) -> None:
-    user_mode[user_id] = mode
-    _save_user_modes()
-
-def get_history(user_id: int) -> list:
-    return conversation_history.setdefault(user_id, [])
-
-def add_message(user_id: int, role: str, parts_data: list) -> None:
-    get_history(user_id).append({"role": role, "parts": parts_data})
-
-def clear_user(user_id: int) -> None:
-    conversation_history.pop(user_id, None)
-    user_mode.pop(user_id, None)
-    _save_user_modes()
-
-# ---------------------------------------------------------------------------
-# Системный промпт обычного режима
+# Системные промпты
 # ---------------------------------------------------------------------------
 _NO_LATEX = (
-    "ВАЖНО: Telegram не поддерживает LaTeX. "
-    "НЕ используй символы $ для формул, \\frac, \\times, \\sqrt и другие LaTeX-команды. "
-    "Вместо них пиши: дроби как '3/4' или '3 6/13', умножение как '×', корень как '√', степень как '^2'. "
-    "Используй обычный текст и Unicode-символы (×, ÷, ±, ≤, ≥, √, π и т.д.)."
+    "ВАЖНО: Telegram не поддерживает LaTeX. НЕ используй $, \\frac, \\times, \\sqrt и т.д. "
+    "Дроби пиши как '3/4', умножение как '×', корень как '√', степень как '^2'. "
+    "Используй Unicode: ×, ÷, ±, ≤, ≥, √, π."
 )
 
 SYSTEM_PROMPT_DEFAULT = (
     "Ты — дружелюбный и умный ИИ-собеседник в Telegram. "
-    "Отвечай развёрнуто, но по делу. "
-    "Используй эмодзи умеренно. "
-    "Пиши на том же языке, на котором пишет пользователь. "
-    + _NO_LATEX
+    "Отвечай развёрнуто, но по делу. Используй эмодзи умеренно. "
+    "Пиши на том же языке, на котором пишет пользователь. " + _NO_LATEX
 )
 
 SYSTEM_PROMPT_IMAGE = (
-    "Ты — умный ИИ-ассистент в Telegram. "
-    "Пользователь прислал изображение. Внимательно проанализируй его и ответь на вопрос или опиши содержимое. "
-    "Если на изображении задача, уравнение или контрольная работа — реши её пошагово. "
-    "Если это фото документа или текста — извлеки и объясни содержимое. "
-    "Отвечай на том же языке, на котором написан вопрос или подпись к изображению. "
-    + _NO_LATEX
+    "Ты — умный ИИ-ассистент в Telegram. Пользователь прислал изображение. "
+    "Внимательно проанализируй его и ответь на вопрос или опиши содержимое. "
+    "Если на изображении задача или контрольная работа — реши её пошагово. "
+    "Если это документ или текст — извлеки и объясни содержимое. "
+    "Отвечай на языке вопроса или подписи к изображению. " + _NO_LATEX
+)
+
+SYSTEM_PROMPT_BUSINESS = (
+    "Ты — умный ИИ-ассистент, который отвечает на сообщения от имени владельца аккаунта Telegram. "
+    "Отвечай вежливо, по делу и кратко. Не раскрывай что ты ИИ, если тебя не спрашивают. "
+    "Пиши на том же языке, что и собеседник. " + _NO_LATEX
 )
 
 # ---------------------------------------------------------------------------
@@ -385,13 +347,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Привет, {user.first_name}! 👋\n"
         "Я ИИ-собеседник на базе Google Gemini.\n\n"
-        "🖼 <b>Умею работать с изображениями!</b>\n"
-        "Просто отправь фото — решу задачи, объясню текст, опишу содержимое.\n\n"
+        "🖼 Умею работать с <b>изображениями</b> — решу задачи, объясню текст на фото.\n"
+        "💼 Поддерживаю <b>автоматизацию чатов</b> — подключи меня в настройках Telegram Business.\n\n"
         "📋 <b>Команды:</b>\n"
-        "/OBZR — режим строгих ответов по учебнику ОБЖ 8–9 кл.\n"
-        "/exit  — выйти из режима учебника\n"
-        "/reset — очистить историю диалога\n\n"
-        "Просто напиши или отправь фото!",
+        "/history  — история диалога и управление ей\n"
+        "/settings — настройки бота\n"
+        "/OBZR     — режим учебника ОБЖ 8–9 кл.\n"
+        "/reset    — очистить историю\n"
+        "/exit     — выйти из режима учебника\n\n"
+        "Напиши что-нибудь или отправь фото!",
         parse_mode=ParseMode.HTML,
     )
 
@@ -400,27 +364,127 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_user(update.effective_user.id)
-    await update.message.reply_text("История очищена. Начинаем с чистого листа! 🗑️")
+    await update.message.reply_text("🗑️ История очищена. Начинаем с чистого листа!")
+
+# ---------------------------------------------------------------------------
+# /history — просмотр истории с кнопками управления
+# ---------------------------------------------------------------------------
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    history = get_history(user_id)
+    timestamps = get_timestamps(user_id)
+
+    if not history:
+        await update.message.reply_text(
+            "📭 История диалога пуста.\n\nНачни общение — и я запомню всё!",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑️ Очистить", callback_data="history:clear"),
+            ]]),
+        )
+        return
+
+    msg_count = len(history)
+    user_msgs = sum(1 for m in history if m["role"] == "user")
+    bot_msgs  = sum(1 for m in history if m["role"] == "model")
+
+    # Последние 3 сообщения для превью
+    preview_lines = []
+    recent = history[-6:] if len(history) >= 6 else history
+    recent_ts = timestamps[-len(recent):] if len(timestamps) >= len(recent) else timestamps
+    for i, msg in enumerate(recent):
+        role_icon = "👤" if msg["role"] == "user" else "🤖"
+        text_parts = msg.get("parts", [])
+        text = text_parts[0].get("text", "") if text_parts else ""
+        short = text[:60].replace("\n", " ")
+        if len(text) > 60:
+            short += "..."
+        ts = recent_ts[i] if i < len(recent_ts) else ""
+        preview_lines.append(f"{role_icon} <i>[{ts}]</i> {short}")
+
+    preview = "\n".join(preview_lines)
+    settings = get_settings(user_id)
+    max_h = settings.get("max_history", 20)
+
+    text = (
+        f"📜 <b>История диалога</b>\n\n"
+        f"💬 Всего сообщений: {msg_count} (лимит: {max_h * 2})\n"
+        f"👤 Твоих: {user_msgs} | 🤖 Моих: {bot_msgs}\n\n"
+        f"<b>Последние сообщения:</b>\n{preview}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🗑️ Очистить всё", callback_data="history:clear"),
+            InlineKeyboardButton("✂️ Оставить 5", callback_data="history:keep5"),
+        ],
+        [
+            InlineKeyboardButton("📉 Лимит: 10", callback_data="settings:max_history:10"),
+            InlineKeyboardButton("📊 Лимит: 20", callback_data="settings:max_history:20"),
+            InlineKeyboardButton("📈 Лимит: 50", callback_data="settings:max_history:50"),
+        ],
+        [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")],
+    ])
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# ---------------------------------------------------------------------------
+# /settings — настройки бота
+# ---------------------------------------------------------------------------
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    settings = get_settings(user_id)
+    mode = user_mode.get(user_id, "default")
+    auto = settings.get("auto_reply", True)
+    max_h = settings.get("max_history", 20)
+
+    mode_label = {"default": "💬 Обычный", "obzr": "📖 ОБЖ"}.get(mode, mode)
+    auto_label = "✅ Вкл" if auto else "❌ Выкл"
+
+    text = (
+        "⚙️ <b>Настройки бота</b>\n\n"
+        f"🗂 Режим: <b>{mode_label}</b>\n"
+        f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
+        f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💬 Обычный режим", callback_data="mode:default"),
+            InlineKeyboardButton("📖 Режим ОБЖ",     callback_data="mode:obzr"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"🔄 Авто-ответ: {'✅' if auto else '❌'}",
+                callback_data="settings:auto_reply:toggle",
+            ),
+        ],
+        [
+            InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
+            InlineKeyboardButton("📝 История: 20", callback_data="settings:max_history:20"),
+            InlineKeyboardButton("📝 История: 50", callback_data="settings:max_history:50"),
+        ],
+        [
+            InlineKeyboardButton("🗑️ Очистить историю", callback_data="history:clear"),
+        ],
+        [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")],
+    ])
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
 # /OBZR
 # ---------------------------------------------------------------------------
 async def cmd_obzr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    book_text = load_book_text()
-    if not book_text:
-        await update.message.reply_text(
-            "⏳ Учебник ещё обрабатывается. Попробуй через несколько минут."
-        )
+    if not load_book_text():
+        await update.message.reply_text("⏳ Учебник ещё обрабатывается. Попробуй через несколько минут.")
         return
     conversation_history.pop(user_id, None)
     set_user_mode(user_id, "obzr")
-    pages_done = get_pages_processed()
     await update.message.reply_text(
         "📖 <b>Режим учебника ОБЖ активирован!</b>\n"
-        f"✅ Загружено страниц: {pages_done}/239\n\n"
+        f"✅ Загружено страниц: {get_pages_processed()}/239\n\n"
         "Задавай вопросы — отвечаю строго по учебнику.\n"
-        "К каждому ответу прикреплю скриншот нужной страницы.\n"
         "/exit — вернуться к обычному режиму",
         parse_mode=ParseMode.HTML,
     )
@@ -432,27 +496,181 @@ async def cmd_exit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if user_mode.get(user_id) == "obzr":
         clear_user(user_id)
-        await update.message.reply_text(
-            "✅ Вышел из режима учебника. Теперь я снова обычный ИИ-собеседник."
-        )
+        await update.message.reply_text("✅ Вышел из режима учебника. Теперь я обычный ИИ-собеседник.")
     else:
         await update.message.reply_text("Ты и так в обычном режиме.")
 
 # ---------------------------------------------------------------------------
-# Обработка изображений (фото и документы-изображения)
+# Callback-кнопки (история / настройки / режим)
+# ---------------------------------------------------------------------------
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "menu:close":
+        await query.message.delete()
+        return
+
+    if data == "history:clear":
+        clear_user(user_id)
+        await query.edit_message_text("🗑️ История диалога очищена!")
+        return
+
+    if data == "history:keep5":
+        history = get_history(user_id)
+        timestamps = get_timestamps(user_id)
+        if len(history) > 10:
+            conversation_history[user_id] = history[-10:]
+            conversation_timestamps[user_id] = timestamps[-10:]
+        await query.edit_message_text("✂️ Оставлены последние 5 обменов.")
+        return
+
+    if data.startswith("mode:"):
+        new_mode = data.split(":")[1]
+        if new_mode == "obzr" and not load_book_text():
+            await query.answer("⏳ Учебник ещё обрабатывается!", show_alert=True)
+            return
+        conversation_history.pop(user_id, None)
+        set_user_mode(user_id, new_mode)
+        label = {"default": "💬 обычный", "obzr": "📖 ОБЖ"}.get(new_mode, new_mode)
+        await query.edit_message_text(f"✅ Режим изменён на {label}.")
+        return
+
+    if data.startswith("settings:"):
+        parts = data.split(":")
+        key = parts[1]
+        val = parts[2] if len(parts) > 2 else None
+        settings = get_settings(user_id)
+
+        if key == "auto_reply" and val == "toggle":
+            settings["auto_reply"] = not settings.get("auto_reply", True)
+            _save_settings()
+            status = "включён" if settings["auto_reply"] else "выключен"
+            await query.edit_message_text(f"🔄 Авто-ответ в бизнес-чатах {status}.")
+            return
+
+        if key == "max_history" and val:
+            settings["max_history"] = int(val)
+            _save_settings()
+            await query.edit_message_text(f"📝 Лимит истории установлен: {val} сообщений.")
+            return
+
+# ---------------------------------------------------------------------------
+# Business Bot: подключение / отключение
+# ---------------------------------------------------------------------------
+async def handle_business_connection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn = update.business_connection
+    user_id = conn.user.id
+
+    if conn.is_enabled:
+        business_connections[conn.id] = user_id
+        logger.info("Business подключение: user=%d conn_id=%s", user_id, conn.id)
+        # Уведомляем владельца в личку
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "✅ <b>Автоматизация чатов подключена!</b>\n\n"
+                    "Теперь я буду отвечать на сообщения в твоих чатах от твоего имени.\n\n"
+                    "⚙️ Управляй настройками через /settings\n"
+                    "🔄 Авто-ответ можно отключить там же."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.warning("Не удалось отправить уведомление: %s", e)
+    else:
+        business_connections.pop(conn.id, None)
+        logger.info("Business отключено: user=%d conn_id=%s", user_id, conn.id)
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="❌ Автоматизация чатов отключена.",
+            )
+        except Exception as e:
+            logger.warning("Не удалось отправить уведомление: %s", e)
+
+# ---------------------------------------------------------------------------
+# Business Bot: входящие сообщения через бизнес-аккаунт
+# ---------------------------------------------------------------------------
+async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.business_message
+    if not msg or not msg.text:
+        return
+
+    conn_id = msg.business_connection_id
+    owner_id = business_connections.get(conn_id)
+
+    if owner_id is None:
+        logger.warning("Business сообщение без известного подключения: %s", conn_id)
+        return
+
+    settings = get_settings(owner_id)
+    if not settings.get("auto_reply", True):
+        logger.info("Авто-ответ выключен для user=%d", owner_id)
+        return
+
+    # Не отвечаем на сообщения самого владельца
+    if msg.from_user and msg.from_user.id == owner_id:
+        return
+
+    sender_name = msg.from_user.first_name if msg.from_user else "Собеседник"
+    logger.info("Business сообщение от %s (conn=%s): %s", sender_name, conn_id, msg.text[:50])
+
+    await context.bot.send_chat_action(
+        chat_id=msg.chat.id,
+        action="typing",
+        business_connection_id=conn_id,
+    )
+
+    # Используем историю владельца для контекста business-чата
+    key = f"biz_{conn_id}_{msg.chat.id}"
+    biz_history = conversation_history.setdefault(key, [])
+    biz_history.append({"role": "user", "parts": [{"text": msg.text}]})
+
+    try:
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=biz_history,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT_BUSINESS,
+                max_output_tokens=1024,
+            ),
+        )
+        reply_text = response.text
+    except Exception as exc:
+        logger.error("Ошибка Gemini (business): %s", exc)
+        return
+
+    biz_history.append({"role": "model", "parts": [{"text": reply_text}]})
+    # Обрезаем историю бизнес-чата
+    if len(biz_history) > 40:
+        conversation_history[key] = biz_history[-40:]
+
+    formatted = md_to_html(reply_text)
+    for part in split_message(formatted):
+        try:
+            await context.bot.send_message(
+                chat_id=msg.chat.id,
+                text=part,
+                parse_mode=ParseMode.HTML,
+                business_connection_id=conn_id,
+            )
+        except Exception as e:
+            logger.error("Ошибка отправки business-ответа: %s", e)
+
+# ---------------------------------------------------------------------------
+# Обработка изображений
 # ---------------------------------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
-    )
-
-    # Получаем подпись к фото (если есть) как вопрос пользователя
     caption = update.message.caption or ""
     user_prompt = caption if caption else "Проанализируй это изображение и опиши что на нём."
 
-    # Скачиваем фото (берём наибольшее разрешение)
     if update.message.photo:
         photo_file = await update.message.photo[-1].get_file()
         mime_type = "image/jpeg"
@@ -463,30 +681,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("⚠️ Не удалось получить изображение.")
         return
 
-    # Скачиваем во временный файл
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp_path = tmp.name
 
     await photo_file.download_to_drive(tmp_path)
-    logger.info("Скачано изображение: %s (%s)", tmp_path, mime_type)
 
     try:
         with open(tmp_path, "rb") as f:
             image_bytes = f.read()
 
-        # Формируем содержимое запроса с изображением
-        contents = [
-            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-            types.Part.from_text(text=user_prompt),
-        ]
-
-        # Добавляем историю диалога (только текстовую часть для контекста)
         history = get_history(user_id)
-
         response = client.models.generate_content(
             model=MODEL,
             contents=history + [{"role": "user", "parts": [
-                {"inline_data": {"mime_type": mime_type, "data": __import__("base64").b64encode(image_bytes).decode()}},
+                {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}},
                 {"text": user_prompt},
             ]}],
             config=types.GenerateContentConfig(
@@ -498,21 +706,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     except Exception as exc:
         logger.error("Ошибка Gemini API (изображение): %s", exc)
-        await update.message.reply_text(
-            "⚠️ Не удалось обработать изображение. Попробуй ещё раз."
-        )
+        await update.message.reply_text("⚠️ Не удалось обработать изображение. Попробуй ещё раз.")
         return
     finally:
-        # Удаляем временный файл
         try:
             os.unlink(tmp_path)
         except Exception:
             pass
 
-    # Сохраняем в историю (только текст, без байтов)
-    add_message(user_id, "user", [{"text": f"[Изображение] {user_prompt}"}])
+    add_message(user_id, "user",  [{"text": f"[Изображение] {user_prompt}"}])
     add_message(user_id, "model", [{"text": reply_text}])
-
     await send_reply(update, reply_text)
 
 # ---------------------------------------------------------------------------
@@ -522,22 +725,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     user_text = update.message.text
     mode = user_mode.get(user_id, "default")
-
     relevant_page_nums: list[int] = []
 
     if mode == "obzr":
         pages = load_book_pages()
         if not pages:
-            await update.message.reply_text(
-                "⏳ Учебник ещё обрабатывается. Попробуй через несколько минут."
-            )
+            await update.message.reply_text("⏳ Учебник ещё обрабатывается. Попробуй позже.")
             return
         relevant_page_nums = search_relevant_pages(user_text, pages, top_n=4)
-        logger.info("Найдены страницы для '%s': %s", user_text[:50], relevant_page_nums)
-
         if relevant_page_nums:
-            relevant_texts = {n: pages[n] for n in relevant_page_nums if n in pages}
-            system_prompt = build_obzr_prompt(relevant_texts)
+            system_prompt = build_obzr_prompt({n: pages[n] for n in relevant_page_nums if n in pages})
         else:
             await update.message.reply_text(
                 "🔍 По вашему вопросу ничего не найдено в учебнике ОБЖ.\n"
@@ -550,9 +747,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     add_message(user_id, "user", [{"text": user_text}])
     history = get_history(user_id)
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
-    )
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
         response = client.models.generate_content(
@@ -564,64 +759,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ),
         )
         reply_text = response.text
-
     except Exception as exc:
         logger.error("Ошибка Gemini API: %s", exc)
         get_history(user_id).pop()
-        await update.message.reply_text(
-            "⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз."
-        )
+        await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
         return
 
     add_message(user_id, "model", [{"text": reply_text}])
     await send_reply(update, reply_text)
 
     if mode == "obzr" and relevant_page_nums:
-        for page_num in relevant_page_nums[:1]:
-            img_path = get_page_image(page_num)
-            if img_path:
-                try:
-                    await context.bot.send_chat_action(
-                        chat_id=update.effective_chat.id, action="upload_photo"
+        img_path = get_page_image(relevant_page_nums[0])
+        if img_path:
+            try:
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+                with open(img_path, "rb") as f:
+                    await update.message.reply_photo(
+                        photo=f,
+                        caption=f"📄 Страница {relevant_page_nums[0]} учебника ОБЖ",
                     )
-                    with open(img_path, "rb") as img_file:
-                        await update.message.reply_photo(
-                            photo=img_file,
-                            caption=f"📄 Страница {page_num} учебника ОБЖ",
-                        )
-                except Exception as e:
-                    logger.warning("Не удалось отправить страницу %d: %s", page_num, e)
+            except Exception as e:
+                logger.warning("Не удалось отправить страницу: %s", e)
 
 # ---------------------------------------------------------------------------
 # Точка входа
 # ---------------------------------------------------------------------------
 def main() -> None:
     logger.info("Запуск Telegram-бота...")
-
-    _load_user_modes()
+    _load_state()
     load_book_pages()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("reset", cmd_reset))
-    app.add_handler(CommandHandler("OBZR", cmd_obzr))
-    app.add_handler(CommandHandler("obzr", cmd_obzr))
-    app.add_handler(CommandHandler("exit", cmd_exit))
+    app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("reset",    cmd_reset))
+    app.add_handler(CommandHandler("history",  cmd_history))
+    app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("OBZR",     cmd_obzr))
+    app.add_handler(CommandHandler("obzr",     cmd_obzr))
+    app.add_handler(CommandHandler("exit",     cmd_exit))
 
-    # Обработчик изображений: фото и изображения-документы
+    # Inline-кнопки
+    app.add_handler(CallbackQueryHandler(handle_callback))
+
+    # Business Bot
+    app.add_handler(BusinessConnectionHandler(handle_business_connection))
+    app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message))
+
+    # Изображения
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(
-        MessageHandler(
-            filters.Document.IMAGE,
-            handle_photo,
-        )
-    )
+    app.add_handler(MessageHandler(filters.Document.IMAGE, handle_photo))
 
-    # Текстовые сообщения
+    # Текст
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Бот запущен. Ожидаю сообщений...")
+    logger.info("Бот запущен.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

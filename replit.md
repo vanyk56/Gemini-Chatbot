@@ -1,45 +1,51 @@
-# [Project name]
+# Gemini Telegram Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Telegram-бот-собеседник на базе Google Gemini с памятью контекста, поддержкой изображений и автоматизацией чатов через Telegram Business.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `uv run python bot/main.py` — запустить бота (workflow "Telegram Bot")
+- Required secrets: `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`
+- Auto-provisioned (Replit): `AI_INTEGRATIONS_GEMINI_BASE_URL`, `AI_INTEGRATIONS_GEMINI_API_KEY`
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.11
+- `python-telegram-bot>=22.7` — Telegram Bot API (с поддержкой Business Bot)
+- `google-genai>=1.75.0` — Gemini AI SDK
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `bot/main.py` — весь код бота
+- `bot/books/obzr.txt` — текст учебника ОБЖ (239 страниц)
+- `bot/books/pages/` — страницы учебника в JPG
+- `bot/user_modes.json` — режимы пользователей (сохраняется между запусками)
+- `bot/user_settings.json` — настройки пользователей
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Gemini клиент поддерживает два режима: Replit proxy (AI_INTEGRATIONS_*) и прямой GEMINI_API_KEY
+- История диалога хранится в памяти, сохраняется покоординатно user/model с временными метками
+- Business Bot использует отдельные истории по ключу `biz_{conn_id}_{chat_id}`
+- LaTeX автоматически конвертируется в читаемый Unicode-текст перед отправкой
+- Системный промпт явно запрещает Gemini использовать LaTeX-нотацию
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Текстовый ИИ-собеседник с памятью контекста (`/history`, `/settings`, `/reset`)
+- Анализ изображений через Gemini Vision (решает задачи, читает текст на фото)
+- Режим учебника ОБЖ — строгие ответы только по тексту учебника + фото страницы
+- **Автоматизация чатов** — Business Bot отвечает в личных чатах от имени владельца
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Код на Python
+- Управление настройками прямо в боте через inline-кнопки (без веб-интерфейса)
+- Gemini интеграция через Replit или прямой API ключ
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- Для Business Bot нужен Telegram Premium или Business аккаунт
+- После рестарта бота история диалогов теряется (in-memory хранение)
+- `filters.UpdateType.BUSINESS_MESSAGE` — правильный фильтр в PTB 22+
+- Пакет называется `google-genai`, а не `google-generativeai`
