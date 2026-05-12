@@ -350,11 +350,28 @@ SYSTEM_PROMPT_IMAGE = (
     "Отвечай на языке вопроса или подписи к изображению. " + _NO_LATEX
 )
 
-SYSTEM_PROMPT_BUSINESS = (
-    "Ты — умный ИИ-ассистент, который отвечает на сообщения от имени владельца аккаунта Telegram. "
-    "Отвечай вежливо, по делу и кратко. Не раскрывай что ты ИИ, если тебя не спрашивают. "
-    "Пиши на том же языке, что и собеседник. " + _NO_LATEX
-)
+def build_business_prompt(persona: str) -> str:
+    base = (
+        "Ты отвечаешь на сообщения от имени человека в Telegram. "
+        "Пиши естественно, по-человечески — как обычный живой собеседник, не как робот. "
+        "Отвечай коротко и по делу, без лишних слов. "
+        "Используй разговорный стиль, иногда сленг если уместно. "
+        "Не раскрывай что ты ИИ. "
+        "Пиши на том же языке, что и собеседник. "
+        + _NO_LATEX
+    )
+    if persona:
+        base += (
+            f"\n\nВот информация о человеке, от чьего имени ты пишешь:\n{persona}\n"
+            "Учитывай эти данные при ответах на личные вопросы."
+        )
+    else:
+        base += (
+            "\n\nЕсли спрашивают что-то личное (возраст, имя, чем занимаешься) — "
+            "отвечай уклончиво и естественно, как человек который не хочет об этом говорить, "
+            "не как робот который 'не может ответить'."
+        )
+    return base
 
 # ---------------------------------------------------------------------------
 # /start
@@ -369,6 +386,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📋 <b>Команды:</b>\n"
         "/history  — история диалога и управление ей\n"
         "/settings — настройки бота\n"
+        "/persona  — настроить личность для авто-ответчика\n"
         "/OBZR     — режим учебника ОБЖ 8–9 кл.\n"
         "/reset    — очистить историю\n"
         "/exit     — выйти из режима учебника\n\n"
@@ -453,15 +471,19 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     mode = user_mode.get(user_id, "default")
     auto = settings.get("auto_reply", True)
     max_h = settings.get("max_history", 20)
+    persona = settings.get("persona", "")
 
     mode_label = {"default": "💬 Обычный", "obzr": "📖 ОБЖ"}.get(mode, mode)
     auto_label = "✅ Вкл" if auto else "❌ Выкл"
+    persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
     text = (
         "⚙️ <b>Настройки бота</b>\n\n"
         f"🗂 Режим: <b>{mode_label}</b>\n"
         f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
         f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
+        f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
+        "Задай личность через /persona — бот будет отвечать естественнее."
     )
 
     keyboard = InlineKeyboardMarkup([
@@ -481,12 +503,46 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             InlineKeyboardButton("📝 История: 50", callback_data="settings:max_history:50"),
         ],
         [
-            InlineKeyboardButton("🗑️ Очистить историю", callback_data="history:clear"),
+            InlineKeyboardButton("🎭 Изменить личность", callback_data="persona:prompt"),
+            InlineKeyboardButton("🗑️ Сбросить личность", callback_data="persona:reset"),
         ],
+        [InlineKeyboardButton("🗑️ Очистить историю", callback_data="history:clear")],
         [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")],
     ])
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# ---------------------------------------------------------------------------
+# /persona — задать личность для авто-ответчика
+# ---------------------------------------------------------------------------
+async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    settings = get_settings(user_id)
+    persona = settings.get("persona", "")
+
+    args = context.args
+    if args:
+        # /persona Меня зовут Дима, мне 20 лет, занимаюсь бизнесом...
+        new_persona = " ".join(args)
+        settings["persona"] = new_persona
+        _save_settings()
+        await update.message.reply_text(
+            f"✅ <b>Личность сохранена!</b>\n\n"
+            f"<i>{new_persona}</i>\n\n"
+            "Теперь авто-ответчик будет использовать эти данные при личных вопросах.",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        current = f"<i>{persona}</i>" if persona else "<i>не задана</i>"
+        await update.message.reply_text(
+            "🎭 <b>Настройка личности авто-ответчика</b>\n\n"
+            f"Текущая: {current}\n\n"
+            "Напиши после команды информацию о себе — бот будет отвечать естественнее:\n\n"
+            "<code>/persona Меня зовут Артём, мне 19 лет. Учусь в универе, "
+            "увлекаюсь музыкой и спортом. Общаюсь неформально.</code>\n\n"
+            "Чем больше деталей — тем естественнее ответы.",
+            parse_mode=ParseMode.HTML,
+        )
 
 # ---------------------------------------------------------------------------
 # /OBZR
@@ -574,6 +630,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(f"📝 Лимит истории установлен: {val} сообщений.")
             return
 
+    if data.startswith("persona:"):
+        action = data.split(":")[1]
+        settings = get_settings(user_id)
+        if action == "reset":
+            settings.pop("persona", None)
+            _save_settings()
+            await query.edit_message_text("🗑️ Личность авто-ответчика сброшена.")
+        elif action == "prompt":
+            await query.edit_message_text(
+                "🎭 Отправь команду с описанием себя:\n\n"
+                "<code>/persona Меня зовут Артём, мне 19 лет. Учусь в универе, "
+                "увлекаюсь музыкой и спортом. Общаюсь неформально.</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+
 # ---------------------------------------------------------------------------
 # Business Bot: подключение / отключение
 # ---------------------------------------------------------------------------
@@ -657,11 +729,12 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
     biz_history.append({"role": "user", "parts": [{"text": msg.text}]})
 
     try:
+        persona = get_settings(owner_id).get("persona", "")
         response = client.models.generate_content(
             model=MODEL,
             contents=biz_history,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT_BUSINESS,
+                system_instruction=build_business_prompt(persona),
                 max_output_tokens=1024,
             ),
         )
@@ -817,6 +890,7 @@ async def post_init(app) -> None:
         BotCommand("start",    "👋 Приветствие и список команд"),
         BotCommand("history",  "📜 История диалога и управление ей"),
         BotCommand("settings", "⚙️ Настройки бота"),
+        BotCommand("persona",  "🎭 Личность авто-ответчика"),
         BotCommand("reset",    "🗑️ Очистить историю диалога"),
         BotCommand("obzr",     "📖 Режим учебника ОБЖ 8–9 кл."),
         BotCommand("exit",     "🚪 Выйти из режима учебника"),
@@ -835,6 +909,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reset",    cmd_reset))
     app.add_handler(CommandHandler("history",  cmd_history))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("persona",  cmd_persona))
     app.add_handler(CommandHandler("OBZR",     cmd_obzr))
     app.add_handler(CommandHandler("obzr",     cmd_obzr))
     app.add_handler(CommandHandler("exit",     cmd_exit))
