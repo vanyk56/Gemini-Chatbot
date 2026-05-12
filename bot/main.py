@@ -80,8 +80,8 @@ else:
         "Нужен GEMINI_API_KEY или AI_INTEGRATIONS_GEMINI_BASE_URL + AI_INTEGRATIONS_GEMINI_API_KEY"
     )
 
-MODEL          = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash")
+MODEL          = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-1.5-flash-latest")
 PAGES_DIR    = Path("bot/books/pages")
 BOOK_PATH    = Path("bot/books/obzr.txt")
 PROGRESS_PATH = Path("bot/books/progress.txt")
