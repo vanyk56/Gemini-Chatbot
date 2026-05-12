@@ -7,6 +7,7 @@ Telegram-бот-собеседник на базе Google Gemini с память
 - `uv run python bot/main.py` — запустить бота (workflow "Telegram Bot")
 - Required secrets: `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`
 - Auto-provisioned (Replit): `AI_INTEGRATIONS_GEMINI_BASE_URL`, `AI_INTEGRATIONS_GEMINI_API_KEY`
+- Optional: `GEMINI_MODEL_FALLBACK` (default: `gemini-1.5-flash`) — резервная модель при превышении квоты
 
 ## Stack
 
@@ -25,6 +26,7 @@ Telegram-бот-собеседник на базе Google Gemini с память
 ## Architecture decisions
 
 - Gemini клиент поддерживает два режима: Replit proxy (AI_INTEGRATIONS_*) и прямой GEMINI_API_KEY
+- Автоматический фоллбэк на `gemini-1.5-flash` при превышении квоты (429 / RESOURCE_EXHAUSTED) — бот не замолкает
 - История диалога хранится в памяти, сохраняется покоординатно user/model с временными метками
 - Business Bot использует отдельные истории по ключу `biz_{conn_id}_{chat_id}`
 - LaTeX автоматически конвертируется в читаемый Unicode-текст перед отправкой

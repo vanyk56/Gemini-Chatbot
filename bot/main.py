@@ -80,12 +80,40 @@ else:
         "Нужен GEMINI_API_KEY или AI_INTEGRATIONS_GEMINI_BASE_URL + AI_INTEGRATIONS_GEMINI_API_KEY"
     )
 
-MODEL        = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL          = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-1.5-flash")
 PAGES_DIR    = Path("bot/books/pages")
 BOOK_PATH    = Path("bot/books/obzr.txt")
 PROGRESS_PATH = Path("bot/books/progress.txt")
 MAX_MSG_LEN  = 4000
 MAX_HISTORY  = 50   # максимум сообщений в памяти
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции с автоматическим фоллбэком при превышении квоты
+# ---------------------------------------------------------------------------
+def _is_quota_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in ("429", "resource_exhausted", "quota", "rate limit", "free_cloud_budget_exceeded"))
+
+def gemini_generate(contents, config: types.GenerateContentConfig, model: str = MODEL):
+    """Вызов generate_content с фоллбэком на резервную модель при квоте."""
+    try:
+        return client.models.generate_content(model=model, contents=contents, config=config)
+    except Exception as exc:
+        if _is_quota_error(exc) and model != MODEL_FALLBACK:
+            logger.warning("Квота модели %s превышена, переключаюсь на %s: %s", model, MODEL_FALLBACK, exc)
+            return client.models.generate_content(model=MODEL_FALLBACK, contents=contents, config=config)
+        raise
+
+def gemini_stream(contents, config: types.GenerateContentConfig, model: str = MODEL):
+    """Вызов generate_content_stream с фоллбэком на резервную модель при квоте."""
+    try:
+        return client.models.generate_content_stream(model=model, contents=contents, config=config)
+    except Exception as exc:
+        if _is_quota_error(exc) and model != MODEL_FALLBACK:
+            logger.warning("Квота модели %s превышена, переключаюсь на %s: %s", model, MODEL_FALLBACK, exc)
+            return client.models.generate_content_stream(model=MODEL_FALLBACK, contents=contents, config=config)
+        raise
 
 # ---------------------------------------------------------------------------
 # LaTeX → читаемый текст
@@ -824,8 +852,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         persona = get_settings(owner_id).get("persona", "")
-        response = client.models.generate_content(
-            model=MODEL,
+        response = gemini_generate(
             contents=biz_history,
             config=types.GenerateContentConfig(
                 system_instruction=build_business_prompt(persona),
@@ -884,8 +911,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             image_bytes = f.read()
 
         history = get_history(user_id)
-        response = client.models.generate_content(
-            model=MODEL,
+        response = gemini_generate(
             contents=history + [{"role": "user", "parts": [
                 {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}},
                 {"text": user_prompt},
@@ -966,8 +992,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history = get_history(user_id)
 
     try:
-        stream_iter = client.models.generate_content_stream(
-            model=MODEL,
+        stream_iter = gemini_stream(
             contents=history,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
@@ -1022,8 +1047,7 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.info("Инлайн-запрос от user=%d: %s", query.from_user.id, user_text[:60])
 
     try:
-        response = client.models.generate_content(
-            model=MODEL,
+        response = gemini_generate(
             contents=[{"role": "user", "parts": [{"text": user_text}]}],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT_DEFAULT,
