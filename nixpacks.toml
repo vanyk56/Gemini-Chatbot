@@ -1,0 +1,2 @@
+# Force Nixpacks to build as a Python project and ignore Node.js/pnpm files
+providers = ["python"]
