@@ -580,6 +580,35 @@ def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 # ---------------------------------------------------------------------------
+# Логика плавающего меню
+# ---------------------------------------------------------------------------
+user_menu_msg: dict[int, int] = {}  # chat_id -> message_id последнего отправленного меню
+
+async def delete_old_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg_id = user_menu_msg.get(chat_id)
+    if msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception as e:
+            logger.debug("Failed to delete old menu message: %s", e)
+        user_menu_msg.pop(chat_id, None)
+
+async def send_new_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str = None) -> None:
+    await delete_old_menu(chat_id, context)
+    if not text:
+        text = "Выберите модель или воспользуйтесь функциями ниже:"
+    try:
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_keyboard(user_id)
+        )
+        user_menu_msg[chat_id] = msg.message_id
+    except Exception as e:
+        logger.error("Failed to send new menu: %s", e)
+
+# ---------------------------------------------------------------------------
 # /start
 # ---------------------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -589,18 +618,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Я умный ИИ-собеседник <b>SYNAPSE</b>.\n\n"
         "Выберите модель или воспользуйтесь функциями ниже:"
     )
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_main_keyboard(user.id),
-    )
+    await send_new_menu(update.effective_chat.id, context, user.id, text)
 
 # ---------------------------------------------------------------------------
 # /reset
 # ---------------------------------------------------------------------------
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user(update.effective_user.id)
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
+    clear_user(user_id)
     await update.message.reply_text("🗑️ История очищена. Начинаем с чистого листа!")
+    if update.effective_chat.type == "private":
+        await send_new_menu(chat_id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # /history
@@ -660,7 +691,12 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")],
     ])
 
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    if update.effective_chat.type == "private":
+        await delete_old_menu(update.effective_chat.id, context)
+        msg = await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        user_menu_msg[update.effective_chat.id] = msg.message_id
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
 # /settings
@@ -710,15 +746,24 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")],
     ])
 
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    if update.effective_chat.type == "private":
+        await delete_old_menu(update.effective_chat.id, context)
+        msg = await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        user_menu_msg[update.effective_chat.id] = msg.message_id
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
 # /persona
 # ---------------------------------------------------------------------------
 async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     settings = get_settings(user_id)
     persona = settings.get("persona", "")
+    
+    if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
 
     args = context.args
     if args:
@@ -741,25 +786,43 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Эти данные бот будет использовать при ответах в Telegram Business.",
             parse_mode=ParseMode.HTML,
         )
+        
+    if update.effective_chat.type == "private":
+        await send_new_menu(chat_id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # Режимы моделей
 # ---------------------------------------------------------------------------
 async def cmd_claude(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
     set_user_mode(user_id, "claude")
     await update.message.reply_text("🎭 <b>Режим Claude активирован!</b>", parse_mode=ParseMode.HTML)
+    if update.effective_chat.type == "private":
+        await send_new_menu(chat_id, context, user_id)
 
 async def cmd_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
     set_user_mode(user_id, "default")
     await update.message.reply_text("💬 <b>Режим Gemini активирован!</b>", parse_mode=ParseMode.HTML)
+    if update.effective_chat.type == "private":
+        await send_new_menu(chat_id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # Глубокие рассуждения: /think
 # ---------------------------------------------------------------------------
 async def handle_think_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
+        
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     temp_history = [{"role": "user", "parts": [{"text": query}]}]
     try:
         stream_iter = await call_external_llm(
@@ -774,14 +837,22 @@ async def handle_think_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except Exception as exc:
         logger.error("Ошибка в /think: %s", exc)
         await update.message.reply_text("⚠️ Не удалось получить ответ. Попробуйте позже.")
+        
+    if update.effective_chat.type == "private":
+        await send_new_menu(chat_id, context, user_id)
 
 async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = " ".join(context.args).strip()
     if not query:
+        chat_id = update.effective_chat.id
+        if update.effective_chat.type == "private":
+            await delete_old_menu(chat_id, context)
         await update.message.reply_text(
             "✏️ Напишите вопрос после команды. Пример:\n<code>/think какая скорость света?</code>",
             parse_mode=ParseMode.HTML
         )
+        if update.effective_chat.type == "private":
+            await send_new_menu(chat_id, context, update.effective_user.id)
         return
     await handle_think_logic(update, context, query)
 
@@ -790,54 +861,148 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
     user_id = update.effective_user.id
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+    chat_id = update.effective_chat.id
+    if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
+        
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
 
     is_russian = bool(re.search('[а-яА-Я]', prompt))
     english_prompt = prompt
     if is_russian:
-        translation_prompt = f"Translate to English: {prompt}"
+        translation_prompt = (
+            f"Translate the following user prompt for image generation into a detailed, high-quality English prompt. "
+            f"Maintain the core style and meaning. Output ONLY the English prompt text, no explanations, no quotes, no extra text.\n\n"
+            f"Prompt to translate: {prompt}"
+        )
         try:
             mode = user_mode.get(user_id, "default")
             if mode == "claude":
-                translation = await call_external_llm("openrouter", "anthropic/claude-opus", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
+                translation = await call_external_llm("openrouter", "anthropic/claude-opus-4.8", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
             else:
-                response = gemini_generate([{"role": "user", "parts": [{"text": translation_prompt}]}], types.GenerateContentConfig(max_output_tokens=256))
-                translation = response.text
+                if os.environ.get("OPENROUTER_API_KEY"):
+                    translation = await call_external_llm("openrouter", "google/gemini-2.5-flash-lite", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
+                else:
+                    response = gemini_generate([{"role": "user", "parts": [{"text": translation_prompt}]}], types.GenerateContentConfig(max_output_tokens=256))
+                    translation = response.text
             if translation:
                 english_prompt = translation.strip()
+                logger.info("Translated prompt: '%s' -> '%s'", prompt, english_prompt)
         except Exception as e:
             logger.warning("Failed to translate prompt: %s", e)
 
     tmp_path = None
     try:
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        if not openrouter_key:
+            raise ValueError("OPENROUTER_API_KEY не настроен")
+
         url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY')}", "Content-Type": "application/json"}
-        payload = {"model": "sourceful/riverflow-v2.5-fast", "messages": [{"role": "user", "content": english_prompt}], "modalities": ["image"]}
+        headers = {
+            "Authorization": f"Bearer {openrouter_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/vanyk56/Gemini-Chatbot",
+            "X-Title": "Telegram Bot"
+        }
+        payload = {
+            "model": "sourceful/riverflow-v2.5-fast",
+            "messages": [{"role": "user", "content": english_prompt}],
+            "modalities": ["image"]
+        }
 
         async with httpx.AsyncClient(timeout=90.0) as client_http:
             response = await client_http.post(url, json=payload, headers=headers)
+            if response.status_code != 200:
+                raise Exception(f"OpenRouter API error {response.status_code}: {response.text}")
+            
             resp_data = response.json()
-            img_url = resp_data.get("choices", [{}])[0].get("message", {}).get("images", [{}])[0].get("image_url", {}).get("url", "")
-            if not img_url.startswith("data:image/"): raise ValueError("Invalid image")
-            image_bytes = base64.b64decode(img_url.split(",", 1)[1])
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                tmp.write(image_bytes)
-                tmp_path = tmp.name
+            choices = resp_data.get("choices", [])
+            if not choices:
+                raise ValueError("No choices in OpenRouter response")
+            
+            msg_data = choices[0].get("message", {})
+            images = msg_data.get("images", [])
+            if not images:
+                content = msg_data.get("content", "")
+                if "data:image/" in content:
+                    img_url = content
+                else:
+                    raise ValueError("No generated images returned in response")
+            else:
+                img_url = images[0].get("image_url", {}).get("url", "")
+
+            if not img_url:
+                raise ValueError("Empty image URL returned")
+
+            # Декодируем base64 или скачиваем по http/https ссылке
+            if img_url.startswith("data:image/"):
+                header, base64_data = img_url.split(",", 1)
+                image_bytes = base64.b64decode(base64_data)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    tmp.write(image_bytes)
+                    tmp_path = tmp.name
+            elif img_url.startswith("http"):
+                async with httpx.AsyncClient(timeout=30.0) as download_client:
+                    img_resp = await download_client.get(img_url)
+                    if img_resp.status_code != 200:
+                        raise Exception(f"Failed to download image from OpenRouter URL: {img_url}")
+                    image_bytes = img_resp.content
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    tmp.write(image_bytes)
+                    tmp_path = tmp.name
+            else:
+                raise ValueError(f"Unknown image URL format: {img_url}")
+
     except Exception as exc:
-        logger.error("Ошибка генерации: %s", exc)
-        await update.message.reply_text("⚠️ Не удалось сгенерировать изображение.")
-        return
+        logger.error("Ошибка генерации через OpenRouter: %s", exc)
+        # Резервный Pollinations AI
+        logger.info("Переключение на Pollinations AI...")
+        try:
+            encoded_prompt = urllib.parse.quote(english_prompt)
+            pollinations_url = f"https://image.pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&nologo=true"
+            async with httpx.AsyncClient(timeout=60.0) as client_http:
+                response = await client_http.get(pollinations_url)
+                if response.status_code != 200:
+                    raise Exception(f"Pollinations AI returned {response.status_code}")
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                    tmp.write(response.content)
+                    tmp_path = tmp.name
+        except Exception as exc2:
+            logger.error("Ошибка Pollinations AI: %s", exc2)
+            await update.message.reply_text("⚠️ Не удалось сгенерировать изображение.")
+            if update.effective_chat.type == "private":
+                await send_new_menu(chat_id, context, user_id)
+            return
 
     try:
         with open(tmp_path, "rb") as f:
-            await update.message.reply_photo(photo=f, caption=f"🎨 <b>Запрос:</b> {prompt}", parse_mode=ParseMode.HTML)
+            await update.message.reply_photo(
+                photo=f,
+                caption=f"🎨 <b>Запрос:</b> {prompt}\n🇬🇧 <b>Промпт:</b> {english_prompt}",
+                parse_mode=ParseMode.HTML
+            )
+    except Exception as e:
+        logger.error("Ошибка отправки фото: %s", e)
+        await update.message.reply_text("⚠️ Ошибка при отправке изображения.")
     finally:
-        if tmp_path: os.unlink(tmp_path)
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    if update.effective_chat.type == "private":
+        await send_new_menu(chat_id, context, user_id)
 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = " ".join(context.args).strip()
     if not prompt:
+        chat_id = update.effective_chat.id
+        if update.effective_chat.type == "private":
+            await delete_old_menu(chat_id, context)
         await update.message.reply_text("✏️ Напишите описание картинки.", parse_mode=ParseMode.HTML)
+        if update.effective_chat.type == "private":
+            await send_new_menu(chat_id, context, update.effective_user.id)
         return
     await handle_image_logic(update, context, prompt)
 
@@ -846,11 +1011,13 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 async def cmd_automate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     settings = get_settings(user_id)
     disabled = settings.setdefault("disabled_chats", [])
     
     # Если пишем в ЛС с ботом, показываем список отключенных
     if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
         if not disabled:
             await update.message.reply_text(
                 "ℹ️ Автоответ включен для всех ваших чатов.\n"
@@ -863,9 +1030,9 @@ async def cmd_automate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "Напишите <code>/automate</code> в том чате, где хотите снова его включить.",
                 parse_mode=ParseMode.HTML
             )
+        await send_new_menu(chat_id, context, user_id)
     else:
         # В группе/супергруппе (если бот запущен)
-        chat_id = update.effective_chat.id
         if chat_id in disabled:
             disabled.remove(chat_id)
             _save_settings()
@@ -1277,7 +1444,11 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
 # ---------------------------------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    chat_id = update.effective_chat.id
+    if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
+        
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     caption = update.message.caption or ""
     user_prompt = caption if caption else "Проанализируй это изображение и опиши что на нём."
@@ -1290,6 +1461,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         mime_type = update.message.document.mime_type
     else:
         await update.message.reply_text("⚠️ Не удалось получить изображение.")
+        if update.effective_chat.type == "private":
+            await send_new_menu(chat_id, context, user_id)
         return
 
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -1379,6 +1552,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as exc:
         logger.error("Ошибка при обработке изображения (%s): %s", model if 'model' in locals() else 'unknown', exc)
         await update.message.reply_text("⚠️ Не удалось обработать изображение. Попробуй ещё раз.")
+        if update.effective_chat.type == "private":
+            await send_new_menu(chat_id, context, user_id)
         return
     finally:
         try:
@@ -1390,6 +1565,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     add_message(user_id, "user",  [{"text": f"[Изображение] {user_prompt}"}])
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
+
+    if update.effective_chat.type == "private":
+        await send_new_menu(chat_id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # Текстовые сообщения в обычном чате
@@ -1431,6 +1609,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if bot_username:
             user_text = re.sub(rf"@{re.escape(bot_username)}", "", user_text, flags=re.IGNORECASE).strip()
 
+    if chat_type == "private":
+        await delete_old_menu(update.effective_chat.id, context)
+
     add_message(user_id, "user", [{"text": user_text}])
     history = get_history(user_id)
 
@@ -1469,10 +1650,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error("Ошибка API (%s / %s): %s", provider, model, exc)
         get_history(user_id).pop()
         await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
+        if chat_type == "private":
+            await send_new_menu(update.effective_chat.id, context, user_id)
         return
 
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
+
+    if chat_type == "private":
+        await send_new_menu(update.effective_chat.id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # Инлайн-режим
