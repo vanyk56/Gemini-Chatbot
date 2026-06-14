@@ -624,14 +624,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # /reset
 # ---------------------------------------------------------------------------
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if update.effective_chat.type == "private":
-        await delete_old_menu(chat_id, context)
-    clear_user(user_id)
+    clear_user(update.effective_user.id)
     await update.message.reply_text("🗑️ История очищена. Начинаем с чистого листа!")
-    if update.effective_chat.type == "private":
-        await send_new_menu(chat_id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # /history
@@ -691,12 +685,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")],
     ])
 
-    if update.effective_chat.type == "private":
-        await delete_old_menu(update.effective_chat.id, context)
-        msg = await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        user_menu_msg[update.effective_chat.id] = msg.message_id
-    else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
 # /settings
@@ -746,24 +735,15 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")],
     ])
 
-    if update.effective_chat.type == "private":
-        await delete_old_menu(update.effective_chat.id, context)
-        msg = await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        user_menu_msg[update.effective_chat.id] = msg.message_id
-    else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
 # /persona
 # ---------------------------------------------------------------------------
 async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     settings = get_settings(user_id)
     persona = settings.get("persona", "")
-    
-    if update.effective_chat.type == "private":
-        await delete_old_menu(chat_id, context)
 
     args = context.args
     if args:
@@ -786,43 +766,25 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Эти данные бот будет использовать при ответах в Telegram Business.",
             parse_mode=ParseMode.HTML,
         )
-        
-    if update.effective_chat.type == "private":
-        await send_new_menu(chat_id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # Режимы моделей
 # ---------------------------------------------------------------------------
 async def cmd_claude(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if update.effective_chat.type == "private":
-        await delete_old_menu(chat_id, context)
     set_user_mode(user_id, "claude")
     await update.message.reply_text("🎭 <b>Режим Claude активирован!</b>", parse_mode=ParseMode.HTML)
-    if update.effective_chat.type == "private":
-        await send_new_menu(chat_id, context, user_id)
 
 async def cmd_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if update.effective_chat.type == "private":
-        await delete_old_menu(chat_id, context)
     set_user_mode(user_id, "default")
     await update.message.reply_text("💬 <b>Режим Gemini активирован!</b>", parse_mode=ParseMode.HTML)
-    if update.effective_chat.type == "private":
-        await send_new_menu(chat_id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # Глубокие рассуждения: /think
 # ---------------------------------------------------------------------------
 async def handle_think_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    if update.effective_chat.type == "private":
-        await delete_old_menu(chat_id, context)
-        
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     temp_history = [{"role": "user", "parts": [{"text": query}]}]
     try:
         stream_iter = await call_external_llm(
@@ -837,22 +799,14 @@ async def handle_think_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except Exception as exc:
         logger.error("Ошибка в /think: %s", exc)
         await update.message.reply_text("⚠️ Не удалось получить ответ. Попробуйте позже.")
-        
-    if update.effective_chat.type == "private":
-        await send_new_menu(chat_id, context, user_id)
 
 async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = " ".join(context.args).strip()
     if not query:
-        chat_id = update.effective_chat.id
-        if update.effective_chat.type == "private":
-            await delete_old_menu(chat_id, context)
         await update.message.reply_text(
             "✏️ Напишите вопрос после команды. Пример:\n<code>/think какая скорость света?</code>",
             parse_mode=ParseMode.HTML
         )
-        if update.effective_chat.type == "private":
-            await send_new_menu(chat_id, context, update.effective_user.id)
         return
     await handle_think_logic(update, context, query)
 
@@ -862,9 +816,6 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    if update.effective_chat.type == "private":
-        await delete_old_menu(chat_id, context)
-        
     await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
 
     is_russian = bool(re.search('[а-яА-Я]', prompt))
@@ -970,8 +921,6 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
         except Exception as exc2:
             logger.error("Ошибка Pollinations AI: %s", exc2)
             await update.message.reply_text("⚠️ Не удалось сгенерировать изображение.")
-            if update.effective_chat.type == "private":
-                await send_new_menu(chat_id, context, user_id)
             return
 
     try:
@@ -991,18 +940,10 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except Exception:
                 pass
 
-    if update.effective_chat.type == "private":
-        await send_new_menu(chat_id, context, user_id)
-
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = " ".join(context.args).strip()
     if not prompt:
-        chat_id = update.effective_chat.id
-        if update.effective_chat.type == "private":
-            await delete_old_menu(chat_id, context)
         await update.message.reply_text("✏️ Напишите описание картинки.", parse_mode=ParseMode.HTML)
-        if update.effective_chat.type == "private":
-            await send_new_menu(chat_id, context, update.effective_user.id)
         return
     await handle_image_logic(update, context, prompt)
 
@@ -1011,13 +952,11 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 async def cmd_automate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     settings = get_settings(user_id)
     disabled = settings.setdefault("disabled_chats", [])
     
     # Если пишем в ЛС с ботом, показываем список отключенных
     if update.effective_chat.type == "private":
-        await delete_old_menu(chat_id, context)
         if not disabled:
             await update.message.reply_text(
                 "ℹ️ Автоответ включен для всех ваших чатов.\n"
@@ -1030,9 +969,9 @@ async def cmd_automate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "Напишите <code>/automate</code> в том чате, где хотите снова его включить.",
                 parse_mode=ParseMode.HTML
             )
-        await send_new_menu(chat_id, context, user_id)
     else:
         # В группе/супергруппе (если бот запущен)
+        chat_id = update.effective_chat.id
         if chat_id in disabled:
             disabled.remove(chat_id)
             _save_settings()
@@ -1444,11 +1383,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
 # ---------------------------------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if update.effective_chat.type == "private":
-        await delete_old_menu(chat_id, context)
-        
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     caption = update.message.caption or ""
     user_prompt = caption if caption else "Проанализируй это изображение и опиши что на нём."
@@ -1461,8 +1396,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         mime_type = update.message.document.mime_type
     else:
         await update.message.reply_text("⚠️ Не удалось получить изображение.")
-        if update.effective_chat.type == "private":
-            await send_new_menu(chat_id, context, user_id)
         return
 
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -1514,7 +1447,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         history = get_history(user_id)
         current_request = history + [{"role": "user", "parts": [photo_part, text_part]}]
         
-        # Определяем провайдера и модель на основе активного режима
+        # Определяем провайдера и модель на основе active_mode
         mode = user_mode.get(user_id, "default")
         if mode == "claude":
             provider = "openrouter"
@@ -1552,8 +1485,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as exc:
         logger.error("Ошибка при обработке изображения (%s): %s", model if 'model' in locals() else 'unknown', exc)
         await update.message.reply_text("⚠️ Не удалось обработать изображение. Попробуй ещё раз.")
-        if update.effective_chat.type == "private":
-            await send_new_menu(chat_id, context, user_id)
         return
     finally:
         try:
@@ -1566,9 +1497,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
 
-    if update.effective_chat.type == "private":
-        await send_new_menu(chat_id, context, user_id)
-
 # ---------------------------------------------------------------------------
 # Текстовые сообщения в обычном чате
 # ---------------------------------------------------------------------------
@@ -1579,10 +1507,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Проверяем состояние ожидания ввода ( think / image )
     state = user_state.pop(user_id, None)
     if state == "awaiting_think":
+        if update.effective_chat.type == "private":
+            await delete_old_menu(update.effective_chat.id, context)
         await handle_think_logic(update, context, user_text)
+        if update.effective_chat.type == "private":
+            await send_new_menu(update.effective_chat.id, context, user_id)
         return
     elif state == "awaiting_image":
+        if update.effective_chat.type == "private":
+            await delete_old_menu(update.effective_chat.id, context)
         await handle_image_logic(update, context, user_text)
+        if update.effective_chat.type == "private":
+            await send_new_menu(update.effective_chat.id, context, user_id)
         return
 
     chat_type = update.effective_chat.type
@@ -1608,9 +1544,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if bot_username:
             user_text = re.sub(rf"@{re.escape(bot_username)}", "", user_text, flags=re.IGNORECASE).strip()
-
-    if chat_type == "private":
-        await delete_old_menu(update.effective_chat.id, context)
 
     add_message(user_id, "user", [{"text": user_text}])
     history = get_history(user_id)
@@ -1650,15 +1583,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error("Ошибка API (%s / %s): %s", provider, model, exc)
         get_history(user_id).pop()
         await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
-        if chat_type == "private":
-            await send_new_menu(update.effective_chat.id, context, user_id)
         return
 
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
-
-    if chat_type == "private":
-        await send_new_menu(update.effective_chat.id, context, user_id)
 
 # ---------------------------------------------------------------------------
 # Инлайн-режим
