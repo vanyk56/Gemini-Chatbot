@@ -1,31 +1,39 @@
 """
-Telegram-бот с ИИ на базе Google Gemini.
+Telegram-бот с ИИ на базе Google Gemini, OpenRouter и OmniRoute.
 
-Секреты:
+Секреты (переменные окружения):
   - TELEGRAM_BOT_TOKEN       — токен бота от @BotFather
-  - GEMINI_API_KEY           — ключ Google AI Studio
-  - AI_INTEGRATIONS_GEMINI_BASE_URL / AI_INTEGRATIONS_GEMINI_API_KEY (Replit proxy)
+  - GEMINI_API_KEY           — ключ Google AI Studio (резервный)
+  - OMNIRUTE_API_KEY         — ключ OmniRoute для Gemini-3.1-lite
+  - OMNIRUTE_BASE_URL        — базовый URL для OmniRoute
+  - OPENROUTER_API_KEY       — ключ OpenRouter для Claude-Opus, Fusion и Riverflow
 
 Команды:
-  /start    — приветствие
-  /reset    — очистить историю диалога
+  /start    — приветствие и список команд
+  /gemini   — переключиться на модель Gemini-3.1-lite (OmniRoute)
+  /claude   — переключиться на модель Claude-Opus (OpenRouter)
+  /think    — глубокий поиск/рассуждения (Fusion через OpenRouter)
+  /image    — сгенерировать изображение (Riverflow через OpenRouter)
   /history  — просмотр и управление историей
   /settings — настройки бота
-  /OBZR     — режим учебника ОБЖ 8–9 кл.
-  /exit     — выйти из режима учебника
+  /reset    — очистить историю диалога
+  /automate — включить/выключить автоответ в текущем чате (для Telegram Business)
 """
 
 import os
 import re
 import json
 import time
+import random
 import asyncio
 import logging
 import tempfile
 import base64
+import urllib.parse
 from pathlib import Path
 from datetime import datetime
 
+import httpx
 from google import genai
 from google.genai import types
 from telegram import (
@@ -57,7 +65,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Токены / клиент
+# Токены / Клиент
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -68,6 +76,8 @@ _DIRECT_API_KEY  = os.environ.get("GEMINI_API_KEY")
 if not TELEGRAM_BOT_TOKEN:
     raise EnvironmentError("TELEGRAM_BOT_TOKEN не задан!")
 
+# Официальный клиент Google GenAI (используется как резервный для текста и handle_photo)
+client = None
 if _REPLIT_BASE_URL and _REPLIT_API_KEY:
     client = genai.Client(
         api_key=_REPLIT_API_KEY,
@@ -76,20 +86,15 @@ if _REPLIT_BASE_URL and _REPLIT_API_KEY:
 elif _DIRECT_API_KEY:
     client = genai.Client(api_key=_DIRECT_API_KEY)
 else:
-    raise EnvironmentError(
-        "Нужен GEMINI_API_KEY или AI_INTEGRATIONS_GEMINI_BASE_URL + AI_INTEGRATIONS_GEMINI_API_KEY"
-    )
+    logger.warning("GEMINI_API_KEY не задан. Официальные функции Gemini будут недоступны.")
 
 MODEL          = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash")
-PAGES_DIR    = Path("bot/books/pages")
-BOOK_PATH    = Path("bot/books/obzr.txt")
-PROGRESS_PATH = Path("bot/books/progress.txt")
 MAX_MSG_LEN  = 4000
 MAX_HISTORY  = 50   # максимум сообщений в памяти
 
 # ---------------------------------------------------------------------------
-# Вспомогательные функции с автоматическим фоллбэком при превышении квоты
+# Вспомогательные функции официального Gemini (резервные)
 # ---------------------------------------------------------------------------
 QUOTA_RETRY_DELAYS = [5, 15, 30]  # секунд между попытками при квоте
 
@@ -99,6 +104,8 @@ def _is_quota_error(exc: Exception) -> bool:
 
 def gemini_generate(contents, config: types.GenerateContentConfig, model: str = MODEL):
     """Вызов generate_content с повторами и фоллбэком на резервную модель при квоте."""
+    if not client:
+        raise ValueError("Официальный клиент Gemini не инициализирован (отсутствует GEMINI_API_KEY)")
     for attempt, delay in enumerate(QUOTA_RETRY_DELAYS + [None]):
         try:
             return client.models.generate_content(model=model, contents=contents, config=config)
@@ -108,7 +115,6 @@ def gemini_generate(contents, config: types.GenerateContentConfig, model: str = 
                     logger.warning("Квота модели %s превышена, жду %ds (попытка %d)...", model, delay, attempt + 1)
                     time.sleep(delay)
                     continue
-                # Все попытки с основной моделью исчерпаны — пробуем фоллбэк
                 if model != MODEL_FALLBACK:
                     logger.warning("Переключаюсь на резервную модель %s", MODEL_FALLBACK)
                     return client.models.generate_content(model=MODEL_FALLBACK, contents=contents, config=config)
@@ -116,6 +122,8 @@ def gemini_generate(contents, config: types.GenerateContentConfig, model: str = 
 
 def gemini_stream(contents, config: types.GenerateContentConfig, model: str = MODEL):
     """Вызов generate_content_stream с повторами и фоллбэком на резервную модель при квоте."""
+    if not client:
+        raise ValueError("Официальный клиент Gemini не инициализирован (отсутствует GEMINI_API_KEY)")
     for attempt, delay in enumerate(QUOTA_RETRY_DELAYS + [None]):
         try:
             return client.models.generate_content_stream(model=model, contents=contents, config=config)
@@ -129,6 +137,114 @@ def gemini_stream(contents, config: types.GenerateContentConfig, model: str = MO
                     logger.warning("Переключаюсь на резервную модель %s", MODEL_FALLBACK)
                     return client.models.generate_content_stream(model=MODEL_FALLBACK, contents=contents, config=config)
             raise
+
+# ---------------------------------------------------------------------------
+# Интеграция с OpenRouter и OmniRoute
+# ---------------------------------------------------------------------------
+def build_openai_payload(model: str, history: list, system_instruction: str = None, stream: bool = False, max_tokens: int = None) -> dict:
+    """Форматирует историю диалога в OpenAI-совместимый Payload с поддержкой мультимодальности (изображения)."""
+    messages = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    
+    for h in history:
+        role = "assistant" if h["role"] == "model" else "user"
+        content_list = []
+        
+        # Разбираем части сообщения (parts)
+        for p in h.get("parts", []):
+            if "text" in p:
+                content_list.append({
+                    "type": "text",
+                    "text": p["text"]
+                })
+            elif "inline_data" in p:
+                mime_type = p["inline_data"].get("mime_type", "image/jpeg")
+                data_b64 = p["inline_data"].get("data", "")
+                content_list.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{data_b64}"
+                    }
+                })
+        
+        # Если в контенте только текст, передаем как простую строку
+        if len(content_list) == 1 and content_list[0]["type"] == "text":
+            messages.append({"role": role, "content": content_list[0]["text"]})
+        else:
+            messages.append({"role": role, "content": content_list})
+        
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": stream
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    return payload
+
+def openrouter_omniroute_stream(url: str, headers: dict, payload: dict):
+    """Синхронный генератор для стриминга ответов через SSE."""
+    with httpx.Client(timeout=60.0) as client_http:
+        with client_http.stream("POST", url, headers=headers, json=payload) as response:
+            if response.status_code != 200:
+                err_text = response.read().decode("utf-8", errors="ignore")
+                raise Exception(f"HTTP {response.status_code}: {err_text}")
+            
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data_json = json.loads(data_str)
+                        chunk = data_json["choices"][0]["delta"].get("content", "")
+                        if chunk:
+                            yield chunk
+                    except Exception:
+                        pass
+
+async def call_external_llm(provider: str, model: str, history: list, system_instruction: str = None, stream: bool = False, max_tokens: int = None):
+    """
+    Вызов внешних моделей через OpenRouter или OmniRoute.
+    Возвращает строку (при stream=False) или генератор чанков (при stream=True).
+    """
+    if provider == "openrouter":
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/vanyk56/Gemini-Chatbot",
+            "X-Title": "Telegram Bot",
+        }
+    elif provider == "omniroute":
+        api_key = os.environ.get("OMNIRUTE_API_KEY")
+        base_url = os.environ.get("OMNIRUTE_BASE_URL", "https://api.omniroute.ai/v1")
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+    else:
+        raise ValueError(f"Неизвестный провайдер: {provider}")
+
+    if not api_key:
+        raise ValueError(f"Отсутствует API-ключ для провайдера {provider}!")
+
+    payload = build_openai_payload(model, history, system_instruction, stream, max_tokens)
+
+    if stream:
+        return openrouter_omniroute_stream(url, headers, payload)
+    else:
+        async with httpx.AsyncClient(timeout=60.0) as client_http:
+            response = await client_http.post(url, headers=headers, json=payload)
+            if response.status_code != 200:
+                raise Exception(f"API {provider} returned HTTP {response.status_code}: {response.text}")
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
 
 # ---------------------------------------------------------------------------
 # LaTeX → читаемый текст
@@ -162,7 +278,7 @@ def latex_to_text(text: str) -> str:
 
     text = re.sub(r"\^\{([^}]+)\}", lambda m: f"^{m.group(1)}", text)
     text = re.sub(r"_\{([^}]+)\}", lambda m: f"_{m.group(1)}", text)
-    text = re.sub(r"\\[a-zA-Z]+", "", text)
+    text = re.sub(r"\llcorner[a-zA-Z]+", "", text)
     text = re.sub(r"[{}]", "", text)
     text = re.sub(r"\$([^$\n]+)\$", lambda m: m.group(1).strip(), text)
     return text
@@ -208,7 +324,7 @@ async def send_reply(update: Update, text: str, business_connection_id: str | No
             await update.message.reply_text(part)
 
 # ---------------------------------------------------------------------------
-# Нативный стриминг через Telegram Bot API sendMessageDraft
+# Нативный стриминг
 # ---------------------------------------------------------------------------
 _draft_counter = 0
 
@@ -218,8 +334,7 @@ def _next_draft_id() -> int:
     return _draft_counter
 
 async def _send_draft(token: str, chat_id: int | str, draft_id: int, text: str) -> None:
-    """Вызывает sendMessageDraft через raw Bot API (метод не поддерживается PTB 22.7)."""
-    import httpx
+    """Вызывает sendMessageDraft через raw Bot API."""
     url = f"https://api.telegram.org/bot{token}/sendMessageDraft"
     payload: dict = {"chat_id": chat_id, "draft_id": draft_id}
     if text:
@@ -240,16 +355,9 @@ async def native_stream_reply(
     *,
     reply_to_message_id: int | None = None,
 ) -> str:
-    """
-    Нативный стриминг:
-      1. sendMessageDraft → анимированный черновик (Thinking... / текст по мере генерации)
-      2. sendMessage      → финальное сообщение (черновик исчезает сам)
-    Возвращает полный сырой текст.
-    """
     chat_id  = update.effective_chat.id
     draft_id = _next_draft_id()
 
-    # Показываем "Thinking..." (пустой text = стандартный плейсхолдер Telegram)
     await _send_draft(token, chat_id, draft_id, "")
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -257,7 +365,10 @@ async def native_stream_reply(
     def _produce() -> None:
         try:
             for chunk in stream_iter:
-                txt = getattr(chunk, "text", None) or ""
+                if isinstance(chunk, str):
+                    txt = chunk
+                else:
+                    txt = getattr(chunk, "text", None) or ""
                 if txt:
                     queue.put_nowait(txt)
             queue.put_nowait(None)
@@ -271,7 +382,7 @@ async def native_stream_reply(
 
     while True:
         try:
-            chunk_text = await asyncio.wait_for(queue.get(), timeout=30.0)
+            chunk_text = await asyncio.wait_for(queue.get(), timeout=45.0)
         except asyncio.TimeoutError:
             break
         if chunk_text is None:
@@ -285,7 +396,6 @@ async def native_stream_reply(
             await _send_draft(token, chat_id, draft_id, latex_to_text(accumulated))
             last_update = now
 
-    # Финальное сообщение — персистентное; черновик исчезает автоматически
     if accumulated:
         final_html = md_to_html(accumulated)
         for part in split_message(final_html):
@@ -306,8 +416,8 @@ USER_MODE_FILE        = Path("bot/user_modes.json")
 USER_SETTINGS_FILE    = Path("bot/user_settings.json")
 BUSINESS_CONN_FILE    = Path("bot/business_connections.json")
 
-conversation_history: dict[int, list]          = {}
-conversation_timestamps: dict[int, list[str]]  = {}
+conversation_history: dict[str, list]          = {}
+conversation_timestamps: dict[str, list[str]]  = {}
 user_mode: dict[int, str]                       = {}
 user_settings: dict[int, dict]                  = {}
 business_connections: dict[str, int]            = {}  # conn_id → user_id
@@ -364,8 +474,10 @@ def _save_settings() -> None:
 def get_settings(user_id: int) -> dict:
     return user_settings.setdefault(user_id, {
         "auto_reply": True,
-        "max_history": 20,
+        "max_history": 10,
         "language": "auto",
+        "disabled_chats": [],
+        "auto_reply_delay": 3.0,
     })
 
 def set_user_mode(user_id: int, mode: str) -> None:
@@ -373,10 +485,10 @@ def set_user_mode(user_id: int, mode: str) -> None:
     _save_modes()
 
 def get_history(user_id: int) -> list:
-    return conversation_history.setdefault(user_id, [])
+    return conversation_history.setdefault(str(user_id), [])
 
 def get_timestamps(user_id: int) -> list:
-    return conversation_timestamps.setdefault(user_id, [])
+    return conversation_timestamps.setdefault(str(user_id), [])
 
 def add_message(user_id: int, role: str, parts_data: list) -> None:
     settings = get_settings(user_id)
@@ -385,87 +497,16 @@ def add_message(user_id: int, role: str, parts_data: list) -> None:
     timestamps = get_timestamps(user_id)
     history.append({"role": role, "parts": parts_data})
     timestamps.append(datetime.now().strftime("%H:%M"))
-    # Обрезаем историю если превышен лимит (попарно user+model)
     while len(history) > max_h * 2:
         history.pop(0)
         if timestamps:
             timestamps.pop(0)
 
 def clear_user(user_id: int) -> None:
-    conversation_history.pop(user_id, None)
-    conversation_timestamps.pop(user_id, None)
+    conversation_history.pop(str(user_id), None)
+    conversation_timestamps.pop(str(user_id), None)
     user_mode.pop(user_id, None)
     _save_modes()
-
-# ---------------------------------------------------------------------------
-# Учебник ОБЖ
-# ---------------------------------------------------------------------------
-def load_book_text() -> str:
-    if BOOK_PATH.exists():
-        text = BOOK_PATH.read_text(encoding="utf-8").strip()
-        if text:
-            return text
-    return ""
-
-def get_pages_processed() -> int:
-    if PROGRESS_PATH.exists():
-        try:
-            return int(PROGRESS_PATH.read_text().strip())
-        except ValueError:
-            return 0
-    return 0
-
-_book_pages: dict[int, str] = {}
-
-def load_book_pages() -> dict[int, str]:
-    global _book_pages
-    if _book_pages:
-        return _book_pages
-    if not BOOK_PATH.exists():
-        return {}
-    raw = BOOK_PATH.read_text(encoding="utf-8")
-    for m in re.finditer(r"=== Страница (\d+) ===\n(.*?)(?==== Страница \d+ ===|\Z)", raw, re.DOTALL):
-        _book_pages[int(m.group(1))] = m.group(2).strip()
-    logger.info("Загружено страниц из кэша: %d", len(_book_pages))
-    return _book_pages
-
-_STOP_WORDS = {
-    "что","как","это","так","еще","ещё","уже","вот","или","при","для","все",
-    "того","этот","эта","эти","этого","этой","такой","такое","такая","такие",
-    "были","была","было","быть","есть","нет","если","можно","нужно","надо",
-    "который","которые","которая","которого","которой","которую","которым",
-    "чтобы","когда","тогда","после","более","очень","какой","какие","между",
-    "также","самый","самая","самое","самые","него","нему","ними","них",
-    "своей","своего","своих","своим","свою","свои","меня","тебя","себя",
-    "мне","тебе","себе","они","она","оно","нас","вас","про",
-}
-
-def search_relevant_pages(question: str, pages: dict[int, str], top_n: int = 4) -> list[int]:
-    all_words = [w.lower().strip("?!.,;:«»\"'()") for w in question.split()]
-    words = [w for w in all_words if len(w) >= 4 and w not in _STOP_WORDS]
-    if not words:
-        words = [w for w in all_words if len(w) >= 3 and w not in _STOP_WORDS]
-    if not words:
-        return []
-    scores: dict[int, float] = {}
-    for page_num, text in pages.items():
-        score = sum(text.lower().count(w) * (len(w) ** 2) for w in words)
-        if score > 0:
-            scores[page_num] = score
-    return sorted(scores, key=lambda p: scores[p], reverse=True)[:top_n]
-
-def build_obzr_prompt(relevant_pages: dict[int, str]) -> str:
-    pages_text = "\n\n".join(f"[Стр. {n}]\n{t}" for n, t in sorted(relevant_pages.items()))
-    return (
-        "Ты — строгий ассистент по ОБЖ (Основы безопасности жизнедеятельности).\n"
-        "Отвечай ИСКЛЮЧИТЕЛЬНО по тексту страниц учебника ниже.\n"
-        "НЕ добавляй факты из своих знаний. Ответ — максимум 150 слов.\n\n"
-        "=== СТРАНИЦЫ УЧЕБНИКА ===\n" + pages_text + "\n=== КОНЕЦ ==="
-    )
-
-def get_page_image(page_num: int) -> Path | None:
-    path = PAGES_DIR / f"page_{page_num:03d}.jpg"
-    return path if path.exists() else None
 
 # ---------------------------------------------------------------------------
 # Системные промпты
@@ -477,9 +518,11 @@ _NO_LATEX = (
 )
 
 SYSTEM_PROMPT_DEFAULT = (
-    "Ты — дружелюбный и умный ИИ-собеседник в Telegram. "
-    "Отвечай развёрнуто, но по делу. Используй эмодзи умеренно. "
-    "Пиши на том же языке, на котором пишет пользователь. " + _NO_LATEX
+    "Ты — дружелюбный, лаконичный и умный ИИ-собеседник в Telegram. "
+    "Отвечай кратко и по делу, экономно расходуй слова и избегай лишней «воды». Используй эмодзи умеренно. "
+    "Пиши на том же языке, на котором пишет пользователь. "
+    "Если пользователь просит тебя сгенерировать, нарисовать или создать изображение/картинку/фото, "
+    "подскажи ему использовать специальную команду /image (или /generate), написав описание картинки после неё. " + _NO_LATEX
 )
 
 SYSTEM_PROMPT_IMAGE = (
@@ -520,17 +563,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     await update.message.reply_text(
         f"Привет, {user.first_name}! 👋\n"
-        "Я ИИ-собеседник на базе Google Gemini.\n\n"
-        "🖼 Умею работать с <b>изображениями</b> — решу задачи, объясню текст на фото.\n"
-        "💼 Поддерживаю <b>автоматизацию чатов</b> — подключи меня в настройках Telegram Business.\n\n"
-        "📋 <b>Команды:</b>\n"
-        "/history  — история диалога и управление ей\n"
+        "Я ИИ-собеседник с поддержкой различных моделей.\n\n"
+        "🔮 <b>Доступные режимы:</b>\n"
+        "/gemini  — переключиться на Gemini-3.1-lite (OmniRoute, по умолчанию)\n"
+        "/claude  — переключиться на Claude-Opus (OpenRouter)\n\n"
+        "💡 <b>Команды:</b>\n"
+        "/think [запрос] — детальные размышления через OpenRouter Fusion\n"
+        "/image [промпт] — генерация картинок через OpenRouter Riverflow\n"
+        "/history  — управление историей диалога\n"
         "/settings — настройки бота\n"
-        "/persona  — настроить личность для авто-ответчика\n"
-        "/OBZR     — режим учебника ОБЖ 8–9 кл.\n"
-        "/reset    — очистить историю\n"
-        "/exit     — выйти из режима учебника\n\n"
-        "Напиши что-нибудь или отправь фото!",
+        "/persona  — настроить личность для автоответчика бизнес-аккаунта\n"
+        "/reset    — очистить текущую историю диалога\n\n"
+        "Напиши сообщение, отправь фото или команду!",
         parse_mode=ParseMode.HTML,
     )
 
@@ -542,7 +586,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🗑️ История очищена. Начинаем с чистого листа!")
 
 # ---------------------------------------------------------------------------
-# /history — просмотр истории с кнопками управления
+# /history
 # ---------------------------------------------------------------------------
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -562,7 +606,6 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_msgs = sum(1 for m in history if m["role"] == "user")
     bot_msgs  = sum(1 for m in history if m["role"] == "model")
 
-    # Последние 3 сообщения для превью
     preview_lines = []
     recent = history[-6:] if len(history) >= 6 else history
     recent_ts = timestamps[-len(recent):] if len(timestamps) >= len(recent) else timestamps
@@ -603,7 +646,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
-# /settings — настройки бота
+# /settings
 # ---------------------------------------------------------------------------
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -613,23 +656,23 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     max_h = settings.get("max_history", 20)
     persona = settings.get("persona", "")
 
-    mode_label = {"default": "💬 Обычный", "obzr": "📖 ОБЖ"}.get(mode, mode)
+    mode_label = {"default": "💬 Gemini (OmniRoute)", "claude": "🎭 Claude (OpenRouter)"}.get(mode, mode)
     auto_label = "✅ Вкл" if auto else "❌ Выкл"
     persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
     text = (
         "⚙️ <b>Настройки бота</b>\n\n"
-        f"🗂 Режим: <b>{mode_label}</b>\n"
+        f"🗂 Режим чата: <b>{mode_label}</b>\n"
         f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
         f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
         f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
-        "Задай личность через /persona — бот будет отвечать естественнее."
+        "Используйте /persona для настройки личности."
     )
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💬 Обычный режим", callback_data="mode:default"),
-            InlineKeyboardButton("📖 Режим ОБЖ",     callback_data="mode:obzr"),
+            InlineKeyboardButton("💬 Gemini (Omni)", callback_data="mode:default"),
+            InlineKeyboardButton("🎭 Claude (OpenRouter)", callback_data="mode:claude"),
         ],
         [
             InlineKeyboardButton(
@@ -653,7 +696,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
-# /persona — задать личность для авто-ответчика
+# /persona
 # ---------------------------------------------------------------------------
 async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -662,7 +705,6 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     args = context.args
     if args:
-        # /persona Меня зовут Дима, мне 20 лет, занимаюсь бизнесом...
         new_persona = " ".join(args)
         settings["persona"] = new_persona
         _save_settings()
@@ -677,41 +719,225 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(
             "🎭 <b>Настройка личности авто-ответчика</b>\n\n"
             f"Текущая: {current}\n\n"
-            "Напиши после команды информацию о себе — бот будет отвечать естественнее:\n\n"
-            "<code>/persona Меня зовут Артём, мне 19 лет. Учусь в универе, "
-            "увлекаюсь музыкой и спортом. Общаюсь неформально.</code>\n\n"
-            "Чем больше деталей — тем естественнее ответы.",
+            "Напишите после команды информацию о себе:\n\n"
+            "<code>/persona Меня зовут Артём, мне 19 лет. Увлекаюсь спортом.</code>\n\n"
+            "Эти данные бот будет использовать при ответах в Telegram Business.",
             parse_mode=ParseMode.HTML,
         )
 
 # ---------------------------------------------------------------------------
-# /OBZR
+# Режимы моделей: /claude и /gemini
 # ---------------------------------------------------------------------------
-async def cmd_obzr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_claude(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if not load_book_text():
-        await update.message.reply_text("⏳ Учебник ещё обрабатывается. Попробуй через несколько минут.")
-        return
-    conversation_history.pop(user_id, None)
-    set_user_mode(user_id, "obzr")
+    set_user_mode(user_id, "claude")
     await update.message.reply_text(
-        "📖 <b>Режим учебника ОБЖ активирован!</b>\n"
-        f"✅ Загружено страниц: {get_pages_processed()}/239\n\n"
-        "Задавай вопросы — отвечаю строго по учебнику.\n"
-        "/exit — вернуться к обычному режиму",
+        "🎭 <b>Режим Claude активирован!</b>\n\n"
+        "Теперь ваши сообщения в чате обрабатываются моделью <code>anthropic/claude-opus-4.8</code> через OpenRouter.",
+        parse_mode=ParseMode.HTML,
+    )
+
+async def cmd_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    set_user_mode(user_id, "default")
+    await update.message.reply_text(
+        "💬 <b>Режим Gemini активирован!</b>\n\n"
+        "Теперь ваши сообщения в чате обрабатываются моделью <code>antigravity/gemini-3.1-flash-lite</code> через OmniRoute.",
         parse_mode=ParseMode.HTML,
     )
 
 # ---------------------------------------------------------------------------
-# /exit
+# Глубокие рассуждения: /think
 # ---------------------------------------------------------------------------
-async def cmd_exit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.message.reply_text(
+            "✏️ Напишите вопрос после команды. Пример:\n<code>/think какая скорость света?</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    
+    # Временный контекст только из этого запроса
+    temp_history = [{"role": "user", "parts": [{"text": query}]}]
+    
+    try:
+        stream_iter = await call_external_llm(
+            provider="openrouter",
+            model="openrouter/fusion",
+            history=temp_history,
+            system_instruction="Ты — аналитический ИИ-ассистент, выполняющий детальный разбор вопросов. Отвечай подробно и по делу.",
+            stream=True,
+            max_tokens=3500
+        )
+        await native_stream_reply(update, context.bot.token, stream_iter)
+    except Exception as exc:
+        logger.error("Ошибка в /think (openrouter/fusion): %s", exc)
+        await update.message.reply_text("⚠️ Не удалось получить ответ от OpenRouter Fusion. Попробуйте позже.")
+
+# ---------------------------------------------------------------------------
+# Генерация картинок: /image
+# ---------------------------------------------------------------------------
+async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_mode.get(user_id) == "obzr":
-        clear_user(user_id)
-        await update.message.reply_text("✅ Вышел из режима учебника. Теперь я обычный ИИ-собеседник.")
+    prompt = " ".join(context.args).strip()
+    if not prompt:
+        await update.message.reply_text(
+            "✏️ Напишите описание картинки. Пример:\n<code>/image котик на космолете</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+
+    # 1. Перевод на английский язык, если есть русские буквы
+    is_russian = bool(re.search('[а-яА-Я]', prompt))
+    english_prompt = prompt
+    if is_russian:
+        translation_prompt = (
+            f"Translate the following user prompt for image generation into a detailed, high-quality English prompt. "
+            f"Maintain the core style and meaning. Output ONLY the English prompt text, no explanations, no quotes, no extra text.\n\n"
+            f"Prompt to translate: {prompt}"
+        )
+        try:
+            mode = user_mode.get(user_id, "default")
+            if mode == "claude":
+                translation = await call_external_llm("openrouter", "anthropic/claude-opus-4.8", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
+            else:
+                if os.environ.get("OMNIRUTE_API_KEY"):
+                    translation = await call_external_llm("omniroute", "antigravity/gemini-3.1-flash-lite", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
+                else:
+                    response = gemini_generate([{"role": "user", "parts": [{"text": translation_prompt}]}], types.GenerateContentConfig(max_output_tokens=256))
+                    translation = response.text
+            if translation:
+                english_prompt = translation.strip()
+                logger.info("Translated prompt: '%s' -> '%s'", prompt, english_prompt)
+        except Exception as e:
+            logger.warning("Failed to translate prompt: %s", e)
+
+    tmp_path = None
+    # 2. Вызываем генерацию через OpenRouter с моделью sourceful/riverflow-v2.5-fast
+    try:
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        if not openrouter_key:
+            raise ValueError("OPENROUTER_API_KEY не настроен")
+
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {openrouter_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/vanyk56/Gemini-Chatbot",
+            "X-Title": "Telegram Bot"
+        }
+        payload = {
+            "model": "sourceful/riverflow-v2.5-fast",
+            "messages": [{"role": "user", "content": english_prompt}],
+            "modalities": ["image"]
+        }
+
+        async with httpx.AsyncClient(timeout=90.0) as client_http:
+            response = await client_http.post(url, json=payload, headers=headers)
+            if response.status_code != 200:
+                raise Exception(f"OpenRouter API error {response.status_code}: {response.text}")
+            
+            resp_data = response.json()
+            choices = resp_data.get("choices", [])
+            if not choices:
+                raise ValueError("No choices in OpenRouter response")
+            
+            msg_data = choices[0].get("message", {})
+            images = msg_data.get("images", [])
+            if not images:
+                content = msg_data.get("content", "")
+                if "data:image/" in content:
+                    img_url = content
+                else:
+                    raise ValueError("No generated images returned in response")
+            else:
+                img_url = images[0].get("image_url", {}).get("url", "")
+
+            if not img_url.startswith("data:image/"):
+                raise ValueError("Generated image URL is not in base64 format")
+
+            header, base64_data = img_url.split(",", 1)
+            image_bytes = base64.b64decode(base64_data)
+
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp.write(image_bytes)
+                tmp_path = tmp.name
+
+    except Exception as exc:
+        logger.error("Ошибка генерации через OpenRouter: %s", exc)
+        # Резервный Pollinations AI
+        logger.info("Переключение на Pollinations AI...")
+        try:
+            encoded_prompt = urllib.parse.quote(english_prompt)
+            pollinations_url = f"https://image.pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&nologo=true"
+            async with httpx.AsyncClient(timeout=60.0) as client_http:
+                response = await client_http.get(pollinations_url)
+                if response.status_code != 200:
+                    raise Exception(f"Pollinations AI returned {response.status_code}")
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                    tmp.write(response.content)
+                    tmp_path = tmp.name
+        except Exception as exc2:
+            logger.error("Ошибка Pollinations AI: %s", exc2)
+            await update.message.reply_text("⚠️ Не удалось сгенерировать изображение.")
+            return
+
+    # Отправка фото
+    try:
+        with open(tmp_path, "rb") as f:
+            await update.message.reply_photo(
+                photo=f,
+                caption=f"🎨 <b>Запрос:</b> {prompt}\n🇬🇧 <b>Промпт:</b> {english_prompt}",
+                parse_mode=ParseMode.HTML
+            )
+    except Exception as e:
+        logger.error("Ошибка отправки фото: %s", e)
+        await update.message.reply_text("⚠️ Ошибка при отправке изображения.")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+# ---------------------------------------------------------------------------
+# Интеграция с Telegram Business: включение/выключение чатов
+# ---------------------------------------------------------------------------
+async def cmd_automate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    settings = get_settings(user_id)
+    disabled = settings.setdefault("disabled_chats", [])
+    
+    # Если пишем в ЛС с ботом, показываем список отключенных
+    if update.effective_chat.type == "private":
+        if not disabled:
+            await update.message.reply_text(
+                "ℹ️ Автоответ включен для всех ваших чатов.\n"
+                "Напишите <code>/automate</code> прямо в любом бизнес-чате, чтобы отключить его для этого чата.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await update.message.reply_text(
+                f"ℹ️ У вас отключен автоответ для {len(disabled)} чатов.\n"
+                "Напишите <code>/automate</code> в том чате, где хотите снова его включить.",
+                parse_mode=ParseMode.HTML
+            )
     else:
-        await update.message.reply_text("Ты и так в обычном режиме.")
+        # В группе/супергруппе (если бот запущен)
+        chat_id = update.effective_chat.id
+        if chat_id in disabled:
+            disabled.remove(chat_id)
+            _save_settings()
+            await update.message.reply_text("✅ <b>Автоответ для этого чата включен!</b>", parse_mode=ParseMode.HTML)
+        else:
+            disabled.append(chat_id)
+            _save_settings()
+            await update.message.reply_text("❌ <b>Автоответ для этого чата выключен!</b>", parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
 # Callback-кнопки (история / настройки / режим)
@@ -735,19 +961,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         history = get_history(user_id)
         timestamps = get_timestamps(user_id)
         if len(history) > 10:
-            conversation_history[user_id] = history[-10:]
-            conversation_timestamps[user_id] = timestamps[-10:]
+            conversation_history[str(user_id)] = history[-10:]
+            conversation_timestamps[str(user_id)] = timestamps[-10:]
         await query.edit_message_text("✂️ Оставлены последние 5 обменов.")
         return
 
     if data.startswith("mode:"):
         new_mode = data.split(":")[1]
-        if new_mode == "obzr" and not load_book_text():
-            await query.answer("⏳ Учебник ещё обрабатывается!", show_alert=True)
-            return
-        conversation_history.pop(user_id, None)
+        conversation_history.pop(str(user_id), None)
         set_user_mode(user_id, new_mode)
-        label = {"default": "💬 обычный", "obzr": "📖 ОБЖ"}.get(new_mode, new_mode)
+        label = {"default": "Gemini (Omni)", "claude": "Claude (OpenRouter)"}.get(new_mode, new_mode)
         await query.edit_message_text(f"✅ Режим изменён на {label}.")
         return
 
@@ -779,9 +1002,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("🗑️ Личность авто-ответчика сброшена.")
         elif action == "prompt":
             await query.edit_message_text(
-                "🎭 Отправь команду с описанием себя:\n\n"
-                "<code>/persona Меня зовут Артём, мне 19 лет. Учусь в универе, "
-                "увлекаюсь музыкой и спортом. Общаюсь неформально.</code>",
+                "🎭 Отправьте команду с описанием себя:\n\n"
+                "<code>/persona Меня зовут Артём, мне 19 лет. Учусь в универе, увлекаюсь музыкой.</code>",
                 parse_mode=ParseMode.HTML,
             )
         return
@@ -804,7 +1026,8 @@ async def handle_business_connection(update: Update, context: ContextTypes.DEFAU
                     "✅ <b>Автоматизация чатов подключена!</b>\n\n"
                     "Теперь я буду отвечать на сообщения в твоих чатах от твоего имени.\n\n"
                     "⚙️ Управляй настройками через /settings\n"
-                    "🔄 Авто-ответ можно отключить там же."
+                    "🔄 Авто-ответ можно отключить там же.\n"
+                    "🚫 Для отключения автоответа в конкретном чате, напиши <code>/automate</code> прямо в нём."
                 ),
                 parse_mode=ParseMode.HTML,
             )
@@ -833,7 +1056,6 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
     conn_id = msg.business_connection_id
     owner_id = business_connections.get(conn_id)
 
-    # Если подключение не в памяти (бот перезапустился) — запросим у Telegram API
     if owner_id is None:
         try:
             conn = await context.bot.get_business_connection(conn_id)
@@ -845,47 +1067,96 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             logger.warning("Не удалось получить business подключение %s: %s", conn_id, e)
             return
 
-    settings = get_settings(owner_id)
-    if not settings.get("auto_reply", True):
-        logger.info("Авто-ответ выключен для user=%d", owner_id)
+    owner_settings = get_settings(owner_id)
+    if not owner_settings.get("auto_reply", True):
         return
 
-    # Не отвечаем на сообщения самого владельца
+    # Проверяем, не отключен ли автоответ для этого чата
+    disabled_chats = owner_settings.setdefault("disabled_chats", [])
+    
+    # Если сам владелец пишет команду /automate в бизнес-чате
     if msg.from_user and msg.from_user.id == owner_id:
+        if msg.text.strip().startswith("/automate"):
+            if msg.chat.id in disabled_chats:
+                disabled_chats.remove(msg.chat.id)
+                _save_settings()
+                await context.bot.send_message(
+                    chat_id=msg.chat.id,
+                    text="✅ <b>Автоответ для этого чата включен!</b>",
+                    parse_mode=ParseMode.HTML,
+                    business_connection_id=conn_id
+                )
+            else:
+                disabled_chats.append(msg.chat.id)
+                _save_settings()
+                await context.bot.send_message(
+                    chat_id=msg.chat.id,
+                    text="❌ <b>Автоответ для этого чата выключен!</b>",
+                    parse_mode=ParseMode.HTML,
+                    business_connection_id=conn_id
+                )
+        return
+
+    # Если автоответ в этом чате выключен владельцем
+    if msg.chat.id in disabled_chats:
         return
 
     sender_name = msg.from_user.first_name if msg.from_user else "Собеседник"
     logger.info("Business сообщение от %s (conn=%s): %s", sender_name, conn_id, msg.text[:50])
 
-    await context.bot.send_chat_action(
-        chat_id=msg.chat.id,
-        action="typing",
-        business_connection_id=conn_id,
-    )
+    # Имитируем человеческое поведение: задержка + статус печатает...
+    delay = float(owner_settings.get("auto_reply_delay", 3.0))
+    actual_delay = random.uniform(0.7 * delay, 1.3 * delay)
 
-    # Используем историю владельца для контекста business-чата
+    async def send_typing_loop():
+        try:
+            steps = int(actual_delay / 4.0) + 1
+            for _ in range(steps):
+                await context.bot.send_chat_action(
+                    chat_id=msg.chat.id,
+                    action="typing",
+                    business_connection_id=conn_id,
+                )
+                await asyncio.sleep(min(4.0, actual_delay))
+        except Exception:
+            pass
+
+    await asyncio.gather(send_typing_loop(), asyncio.sleep(actual_delay))
+
     key = f"biz_{conn_id}_{msg.chat.id}"
     biz_history = conversation_history.setdefault(key, [])
     biz_history.append({"role": "user", "parts": [{"text": msg.text}]})
 
     try:
-        persona = get_settings(owner_id).get("persona", "")
-        response = gemini_generate(
-            contents=biz_history,
-            config=types.GenerateContentConfig(
-                system_instruction=build_business_prompt(persona),
-                max_output_tokens=1024,
-            ),
-        )
-        reply_text = response.text
+        persona = owner_settings.get("persona", "")
+        system_prompt = build_business_prompt(persona)
+
+        # Для автоматизации используем antigravity/gemini-3.1-flash-lite через OmniRoute
+        if os.environ.get("OMNIRUTE_API_KEY"):
+            reply_text = await call_external_llm(
+                provider="omniroute",
+                model="antigravity/gemini-3.1-flash-lite",
+                history=biz_history,
+                system_instruction=system_prompt,
+                stream=False,
+                max_tokens=1024
+            )
+        else:
+            response = gemini_generate(
+                contents=biz_history,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    max_output_tokens=1024,
+                ),
+            )
+            reply_text = response.text
     except Exception as exc:
-        logger.error("Ошибка Gemini (business): %s", exc)
+        logger.error("Ошибка при генерации автоответа в бизнес-чате: %s", exc)
         return
 
     biz_history.append({"role": "model", "parts": [{"text": reply_text}]})
-    # Обрезаем историю бизнес-чата
-    if len(biz_history) > 40:
-        conversation_history[key] = biz_history[-40:]
+    if len(biz_history) > 10:
+        conversation_history[key] = biz_history[-10:]
 
     formatted = md_to_html(reply_text)
     for part in split_message(formatted):
@@ -900,7 +1171,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             logger.error("Ошибка отправки business-ответа: %s", e)
 
 # ---------------------------------------------------------------------------
-# Обработка изображений
+# Обработка изображений ( handle_photo ) с полной поддержкой OmniRoute & OpenRouter
 # ---------------------------------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -925,24 +1196,87 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await photo_file.download_to_drive(tmp_path)
 
     try:
-        with open(tmp_path, "rb") as f:
-            image_bytes = f.read()
+        # Сжимаем и уменьшаем разрешение изображения с помощью Pillow для экономии токенов
+        from PIL import Image
+        from io import BytesIO
+        try:
+            with Image.open(tmp_path) as img:
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                
+                # Уменьшаем разрешение, если длинная сторона больше 1024px (сохраняя пропорции)
+                width, height = img.size
+                if max(width, height) > 1024:
+                    if width > height:
+                        new_width = 1024
+                        new_height = int(height * (1024 / width))
+                    else:
+                        new_height = 1024
+                        new_width = int(width * (1024 / height))
+                    img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+                out = BytesIO()
+                img.save(out, format="JPEG", quality=80)
+                image_bytes = out.getvalue()
+                mime_type = "image/jpeg"
+        except Exception as compress_err:
+            logger.warning("Ошибка при сжатии изображения: %s. Используем оригинал.", compress_err)
+            with open(tmp_path, "rb") as f:
+                image_bytes = f.read()
 
+        base64_data = base64.b64encode(image_bytes).decode()
+        
+        # Подготавливаем блок inline_data (картинка) + текстовый запрос
+        photo_part = {
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": base64_data
+            }
+        }
+        text_part = {"text": user_prompt}
+        
+        # Объединяем с историей сообщений пользователя
         history = get_history(user_id)
-        response = gemini_generate(
-            contents=history + [{"role": "user", "parts": [
-                {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}},
-                {"text": user_prompt},
-            ]}],
-            config=types.GenerateContentConfig(
+        current_request = history + [{"role": "user", "parts": [photo_part, text_part]}]
+        
+        # Определяем провайдера и модель на основе активного режима
+        mode = user_mode.get(user_id, "default")
+        if mode == "claude":
+            provider = "openrouter"
+            model = "anthropic/claude-opus-4.8"
+        else:
+            if os.environ.get("OMNIRUTE_API_KEY"):
+                provider = "omniroute"
+                # Используем специализированную модель gemini-3-pro-image-preview для картинок
+                model = "antigravity/gemini-3-pro-image-preview"
+            else:
+                provider = "gemini"
+                model = MODEL
+
+        logger.info("Анализ фото пользователем %d с помощью %s (%s)", user_id, model, provider)
+
+        if provider in ("openrouter", "omniroute"):
+            # Для внешних провайдеров преобразуем payload в формат OpenAI (с base64 image_url) и стримим
+            stream_iter = await call_external_llm(
+                provider=provider,
+                model=model,
+                history=current_request,
+                system_instruction=SYSTEM_PROMPT_IMAGE,
+                stream=True,
+                max_tokens=8192
+            )
+            reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
+        else:
+            # Для официального Gemini
+            stream_config = types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT_IMAGE,
                 max_output_tokens=8192,
-            ),
-        )
-        reply_text = response.text
+            )
+            stream_iter = gemini_stream(contents=current_request, config=stream_config)
+            reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
 
     except Exception as exc:
-        logger.error("Ошибка Gemini API (изображение): %s", exc)
+        logger.error("Ошибка при обработке изображения (%s): %s", model if 'model' in locals() else 'unknown', exc)
         await update.message.reply_text("⚠️ Не удалось обработать изображение. Попробуй ещё раз.")
         return
     finally:
@@ -951,12 +1285,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass
 
+    # Сохраняем в историю диалога
     add_message(user_id, "user",  [{"text": f"[Изображение] {user_prompt}"}])
-    add_message(user_id, "model", [{"text": reply_text}])
-    await send_reply(update, reply_text)
+    if reply_text:
+        add_message(user_id, "model", [{"text": reply_text}])
 
 # ---------------------------------------------------------------------------
-# Текстовые сообщения
+# Текстовые сообщения в обычном чате
 # ---------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -964,7 +1299,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_type = update.effective_chat.type
     mode = user_mode.get(user_id, "default")
 
-    # В группах — отвечаем только при упоминании @бота или ответе на его сообщение
     if chat_type in ("group", "supergroup"):
         bot_username = (context.bot.username or "").lower()
         msg = update.message
@@ -983,76 +1317,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not mentioned and not replying_to_bot:
             return
 
-        # Убираем @упоминание из текста перед отправкой в Gemini
         if bot_username:
             user_text = re.sub(rf"@{re.escape(bot_username)}", "", user_text, flags=re.IGNORECASE).strip()
-
-    relevant_page_nums: list[int] = []
-
-    if mode == "obzr":
-        pages = load_book_pages()
-        if not pages:
-            await update.message.reply_text("⏳ Учебник ещё обрабатывается. Попробуй позже.")
-            return
-        relevant_page_nums = search_relevant_pages(user_text, pages, top_n=4)
-        if relevant_page_nums:
-            system_prompt = build_obzr_prompt({n: pages[n] for n in relevant_page_nums if n in pages})
-        else:
-            await update.message.reply_text(
-                "🔍 По вашему вопросу ничего не найдено в учебнике ОБЖ.\n"
-                "Попробуй перефразировать или уточнить тему."
-            )
-            return
-    else:
-        system_prompt = SYSTEM_PROMPT_DEFAULT
 
     add_message(user_id, "user", [{"text": user_text}])
     history = get_history(user_id)
 
-    stream_config = types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        max_output_tokens=8192,
-    )
-    try:
-        stream_iter = gemini_stream(contents=history, config=stream_config)
-        reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
-    except Exception as exc:
-        if _is_quota_error(exc):
-            logger.warning("Квота основной модели исчерпана при стриминге, переключаюсь на %s", MODEL_FALLBACK)
-            try:
-                stream_iter = gemini_stream(contents=history, config=stream_config, model=MODEL_FALLBACK)
-                reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
-            except Exception as exc2:
-                logger.error("Ошибка Gemini API (fallback): %s", exc2)
-                get_history(user_id).pop()
-                await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
-                return
+    # Определяем провайдера и модель на основе выбранного режима
+    if mode == "claude":
+        provider = "openrouter"
+        model = "anthropic/claude-opus-4.8"
+    else:
+        # Для default режима по умолчанию OmniRoute с Gemini 3.1
+        if os.environ.get("OMNIRUTE_API_KEY"):
+            provider = "omniroute"
+            model = "antigravity/gemini-3.1-flash-lite"
         else:
-            logger.error("Ошибка Gemini API: %s", exc)
-            get_history(user_id).pop()
-            await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
-            return
+            # Фоллбэк на официальный Gemini
+            provider = "gemini"
+            model = MODEL
+
+    try:
+        if provider in ("openrouter", "omniroute"):
+            stream_iter = await call_external_llm(
+                provider=provider,
+                model=model,
+                history=history,
+                system_instruction=SYSTEM_PROMPT_DEFAULT,
+                stream=True,
+                max_tokens=8192
+            )
+            reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
+        else:
+            stream_config = types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT_DEFAULT,
+                max_output_tokens=8192,
+            )
+            stream_iter = gemini_stream(contents=history, config=stream_config)
+            reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
+            
+    except Exception as exc:
+        logger.error("Ошибка API (%s / %s): %s", provider, model, exc)
+        get_history(user_id).pop()
+        await update.message.reply_text("⚠️ Не удалось получить ответ от ИИ. Попробуй ещё раз.")
+        return
 
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
 
-    if mode == "obzr" and relevant_page_nums:
-        img_path = get_page_image(relevant_page_nums[0])
-        if img_path:
-            try:
-                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-                with open(img_path, "rb") as f:
-                    await update.message.reply_photo(
-                        photo=f,
-                        caption=f"📄 Страница {relevant_page_nums[0]} учебника ОБЖ",
-                    )
-            except Exception as e:
-                logger.warning("Не удалось отправить страницу: %s", e)
-
 # ---------------------------------------------------------------------------
-# Инлайн-режим: @бот вопрос — в любом чате без добавления бота
+# Инлайн-режим
 # ---------------------------------------------------------------------------
-INLINE_CACHE_TIME = 0  # секунд (0 = не кешировать, у каждого свой ответ)
+INLINE_CACHE_TIME = 0
 
 async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.inline_query
@@ -1068,22 +1384,43 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     logger.info("Инлайн-запрос от user=%d: %s", query.from_user.id, user_text[:60])
+    user_id = query.from_user.id
+    mode = user_mode.get(user_id, "default")
 
     try:
-        response = gemini_generate(
-            contents=[{"role": "user", "parts": [{"text": user_text}]}],
-            config=types.GenerateContentConfig(
+        if mode == "claude":
+            answer_raw = await call_external_llm(
+                provider="openrouter",
+                model="anthropic/claude-opus-4.8",
+                history=[{"role": "user", "parts": [{"text": user_text}]}],
                 system_instruction=SYSTEM_PROMPT_DEFAULT,
-                max_output_tokens=2048,
-            ),
-        )
-        answer_raw = response.text or "Не удалось получить ответ."
+                stream=False,
+                max_tokens=2048
+            )
+        else:
+            if os.environ.get("OMNIRUTE_API_KEY"):
+                answer_raw = await call_external_llm(
+                    provider="omniroute",
+                    model="antigravity/gemini-3.1-flash-lite",
+                    history=[{"role": "user", "parts": [{"text": user_text}]}],
+                    system_instruction=SYSTEM_PROMPT_DEFAULT,
+                    stream=False,
+                    max_tokens=2048
+                )
+            else:
+                response = gemini_generate(
+                    contents=[{"role": "user", "parts": [{"text": user_text}]}],
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT_DEFAULT,
+                        max_output_tokens=2048,
+                    ),
+                )
+                answer_raw = response.text or "Не удалось получить ответ."
     except Exception as exc:
-        logger.error("Ошибка Gemini (inline): %s", exc)
+        logger.error("Ошибка в инлайн-режиме: %s", exc)
         answer_raw = "⚠️ Ошибка при обращении к ИИ. Попробуй ещё раз."
 
     answer_html = md_to_html(answer_raw)
-    # Telegram inline: максимум 4096 символов в тексте результата
     short_preview = answer_raw[:120].replace("\n", " ") + ("…" if len(answer_raw) > 120 else "")
 
     import hashlib
@@ -1113,20 +1450,19 @@ async def post_init(app) -> None:
     from telegram import BotCommand
     await app.bot.set_my_commands([
         BotCommand("start",    "👋 Приветствие и список команд"),
-        BotCommand("history",  "📜 История диалога и управление ей"),
+        BotCommand("gemini",   "💬 Gemini-3.1-lite (OmniRoute)"),
+        BotCommand("claude",   "🎭 Claude-Opus (OpenRouter)"),
+        BotCommand("think",    "🧠 Глубокий поиск (Fusion OpenRouter)"),
+        BotCommand("image",    "🎨 Генерация картинок (Riverflow OR)"),
+        BotCommand("history",  "📜 Управление историей диалога"),
         BotCommand("settings", "⚙️ Настройки бота"),
-        BotCommand("persona",  "🎭 Личность авто-ответчика"),
         BotCommand("reset",    "🗑️ Очистить историю диалога"),
-        BotCommand("obzr",     "📖 Режим учебника ОБЖ 8–9 кл."),
-        BotCommand("exit",     "🚪 Выйти из режима учебника"),
     ])
     logger.info("Меню команд обновлено.")
-
 
 def main() -> None:
     logger.info("Запуск Telegram-бота...")
     _load_state()
-    load_book_pages()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
@@ -1135,14 +1471,17 @@ def main() -> None:
     app.add_handler(CommandHandler("history",  cmd_history))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("persona",  cmd_persona))
-    app.add_handler(CommandHandler("OBZR",     cmd_obzr))
-    app.add_handler(CommandHandler("obzr",     cmd_obzr))
-    app.add_handler(CommandHandler("exit",     cmd_exit))
+    app.add_handler(CommandHandler("claude",   cmd_claude))
+    app.add_handler(CommandHandler("gemini",   cmd_gemini))
+    app.add_handler(CommandHandler("think",    cmd_think))
+    app.add_handler(CommandHandler("image",    cmd_image))
+    app.add_handler(CommandHandler("generate", cmd_image))
+    app.add_handler(CommandHandler("automate", cmd_automate))
 
     # Inline-кнопки
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    # Инлайн-режим (без добавления бота в чат)
+    # Инлайн-режим
     app.add_handler(InlineQueryHandler(handle_inline))
 
     # Business Bot
@@ -1153,7 +1492,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_photo))
 
-    # Текст: личка — всегда; группы — при упоминании или ответе на бота
+    # Текст
     _group_mention_filter = (
         filters.ChatType.GROUPS & (filters.Entity("mention") | filters.REPLY)
     )
@@ -1164,7 +1503,6 @@ def main() -> None:
 
     logger.info("Бот запущен.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
