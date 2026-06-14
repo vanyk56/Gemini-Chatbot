@@ -1233,11 +1233,11 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         persona = owner_settings.get("persona", "")
         system_prompt = build_business_prompt(persona)
 
-        # Для автоматизации используем antigravity/gemini-3.1-flash-lite через OmniRoute
-        if os.environ.get("OMNIRUTE_API_KEY"):
+        # Для автоматизации используем google/gemini-2.5-flash-lite через OpenRouter
+        if os.environ.get("OPENROUTER_API_KEY"):
             reply_text = await call_external_llm(
-                provider="omniroute",
-                model="antigravity/gemini-3.1-flash-lite",
+                provider="openrouter",
+                model="google/gemini-2.5-flash-lite",
                 history=biz_history,
                 system_instruction=system_prompt,
                 stream=False,
@@ -1347,10 +1347,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             provider = "openrouter"
             model = "anthropic/claude-opus-4.8"
         else:
-            if os.environ.get("OMNIRUTE_API_KEY"):
-                provider = "omniroute"
-                # Используем специализированную модель gemini-3-pro-image-preview для картинок
-                model = "antigravity/gemini-3-pro-image-preview"
+            if os.environ.get("OPENROUTER_API_KEY"):
+                provider = "openrouter"
+                model = "google/gemini-2.5-flash"
             else:
                 provider = "gemini"
                 model = MODEL
@@ -1440,12 +1439,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         provider = "openrouter"
         model = "anthropic/claude-opus-4.8"
     else:
-        # Для default режима по умолчанию OmniRoute с Gemini 3.1
-        if os.environ.get("OMNIRUTE_API_KEY"):
-            provider = "omniroute"
-            model = "antigravity/gemini-3.1-flash-lite"
+        if os.environ.get("OPENROUTER_API_KEY"):
+            provider = "openrouter"
+            model = "google/gemini-2.5-flash-lite"
         else:
-            # Фоллбэк на официальный Gemini
             provider = "gemini"
             model = MODEL
 
@@ -1510,10 +1507,10 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 max_tokens=2048
             )
         else:
-            if os.environ.get("OMNIRUTE_API_KEY"):
+            if os.environ.get("OPENROUTER_API_KEY"):
                 answer_raw = await call_external_llm(
-                    provider="omniroute",
-                    model="antigravity/gemini-3.1-flash-lite",
+                    provider="openrouter",
+                    model="google/gemini-2.5-flash-lite",
                     history=[{"role": "user", "parts": [{"text": user_text}]}],
                     system_instruction=SYSTEM_PROMPT_DEFAULT,
                     stream=False,
