@@ -222,7 +222,7 @@ async def call_external_llm(provider: str, model: str, history: list, system_ins
         }
     elif provider == "omniroute":
         api_key = os.environ.get("OMNIRUTE_API_KEY")
-        base_url = os.environ.get("OMNIRUTE_BASE_URL", "https://api.omniroute.ai/v1")
+        base_url = os.environ.get("OMNIRUTE_BASE_URL", "https://api.omniroute.online/v1")
         url = f"{base_url.rstrip('/')}/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -421,6 +421,7 @@ conversation_timestamps: dict[str, list[str]]  = {}
 user_mode: dict[int, str]                       = {}
 user_settings: dict[int, dict]                  = {}
 business_connections: dict[str, int]            = {}  # conn_id → user_id
+user_state: dict[int, str]                      = {}  # Состояние ввода пользователя
 
 def _load_state() -> None:
     global user_mode, user_settings, business_connections
@@ -518,7 +519,7 @@ _NO_LATEX = (
 )
 
 SYSTEM_PROMPT_DEFAULT = (
-    "Ты — дружелюбный, лаконичный и умный ИИ-собеседник в Telegram. "
+    "Ты — дружелюбный, лаконичный и умный ИИ-собеседник SYNAPSE в Telegram. "
     "Отвечай кратко и по делу, экономно расходуй слова и избегай лишней «воды». Используй эмодзи умеренно. "
     "Пиши на том же языке, на котором пишет пользователь. "
     "Если пользователь просит тебя сгенерировать, нарисовать или создать изображение/картинку/фото, "
@@ -556,26 +557,42 @@ def build_business_prompt(persona: str) -> str:
         )
     return base
 
+def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    mode = user_mode.get(user_id, "default")
+    
+    gemini_label = "🤖 Gemini (Бесплатно) ✅" if mode == "default" else "🤖 Gemini (Бесплатно)"
+    claude_label = "👑 Claude Opus (Премиум) ✅" if mode == "claude" else "👑 Claude Opus (Премиум)"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(gemini_label, callback_data="mode:default"),
+            InlineKeyboardButton(claude_label, callback_data="mode:claude"),
+        ],
+        [
+            InlineKeyboardButton("🧠 Глубокое мышление", callback_data="action:think"),
+            InlineKeyboardButton("🎨 Генерация фото", callback_data="action:image"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Настройки", callback_data="action:settings"),
+            InlineKeyboardButton("🗑️ Очистить контекст", callback_data="history:clear"),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 # ---------------------------------------------------------------------------
 # /start
 # ---------------------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    await update.message.reply_text(
+    text = (
         f"Привет, {user.first_name}! 👋\n"
-        "Я ИИ-собеседник с поддержкой различных моделей.\n\n"
-        "🔮 <b>Доступные режимы:</b>\n"
-        "/gemini  — переключиться на Gemini-3.1-lite (OmniRoute, по умолчанию)\n"
-        "/claude  — переключиться на Claude-Opus (OpenRouter)\n\n"
-        "💡 <b>Команды:</b>\n"
-        "/think [запрос] — детальные размышления через OpenRouter Fusion\n"
-        "/image [промпт] — генерация картинок через OpenRouter Riverflow\n"
-        "/history  — управление историей диалога\n"
-        "/settings — настройки бота\n"
-        "/persona  — настроить личность для автоответчика бизнес-аккаунта\n"
-        "/reset    — очистить текущую историю диалога\n\n"
-        "Напиши сообщение, отправь фото или команду!",
+        "Я умный ИИ-собеседник <b>SYNAPSE</b>.\n\n"
+        "Выберите модель или воспользуйтесь функциями ниже:"
+    )
+    await update.message.reply_text(
+        text,
         parse_mode=ParseMode.HTML,
+        reply_markup=get_main_keyboard(user.id),
     )
 
 # ---------------------------------------------------------------------------
@@ -671,8 +688,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💬 Gemini (Omni)", callback_data="mode:default"),
-            InlineKeyboardButton("🎭 Claude (OpenRouter)", callback_data="mode:claude"),
+            InlineKeyboardButton("💬 Gemini", callback_data="mode:default"),
+            InlineKeyboardButton("🎭 Claude", callback_data="mode:claude"),
         ],
         [
             InlineKeyboardButton(
@@ -681,9 +698,9 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ),
         ],
         [
-            InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
-            InlineKeyboardButton("📝 История: 20", callback_data="settings:max_history:20"),
-            InlineKeyboardButton("📝 История: 50", callback_data="settings:max_history:50"),
+            InlineKeyboardButton("📝 10", callback_data="settings:max_history:10"),
+            InlineKeyboardButton("📝 20", callback_data="settings:max_history:20"),
+            InlineKeyboardButton("📝 50", callback_data="settings:max_history:50"),
         ],
         [
             InlineKeyboardButton("🎭 Изменить личность", callback_data="persona:prompt"),
@@ -726,43 +743,24 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 # ---------------------------------------------------------------------------
-# Режимы моделей: /claude и /gemini
+# Режимы моделей
 # ---------------------------------------------------------------------------
 async def cmd_claude(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     set_user_mode(user_id, "claude")
-    await update.message.reply_text(
-        "🎭 <b>Режим Claude активирован!</b>\n\n"
-        "Теперь ваши сообщения в чате обрабатываются моделью <code>anthropic/claude-opus-4.8</code> через OpenRouter.",
-        parse_mode=ParseMode.HTML,
-    )
+    await update.message.reply_text("🎭 <b>Режим Claude активирован!</b>", parse_mode=ParseMode.HTML)
 
 async def cmd_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     set_user_mode(user_id, "default")
-    await update.message.reply_text(
-        "💬 <b>Режим Gemini активирован!</b>\n\n"
-        "Теперь ваши сообщения в чате обрабатываются моделью <code>antigravity/gemini-3.1-flash-lite</code> через OmniRoute.",
-        parse_mode=ParseMode.HTML,
-    )
+    await update.message.reply_text("💬 <b>Режим Gemini активирован!</b>", parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
 # Глубокие рассуждения: /think
 # ---------------------------------------------------------------------------
-async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = " ".join(context.args).strip()
-    if not query:
-        await update.message.reply_text(
-            "✏️ Напишите вопрос после команды. Пример:\n<code>/think какая скорость света?</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
+async def handle_think_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    
-    # Временный контекст только из этого запроса
     temp_history = [{"role": "user", "parts": [{"text": query}]}]
-    
     try:
         stream_iter = await call_external_llm(
             provider="openrouter",
@@ -774,136 +772,74 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await native_stream_reply(update, context.bot.token, stream_iter)
     except Exception as exc:
-        logger.error("Ошибка в /think (openrouter/fusion): %s", exc)
-        await update.message.reply_text("⚠️ Не удалось получить ответ от OpenRouter Fusion. Попробуйте позже.")
+        logger.error("Ошибка в /think: %s", exc)
+        await update.message.reply_text("⚠️ Не удалось получить ответ. Попробуйте позже.")
+
+async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.message.reply_text(
+            "✏️ Напишите вопрос после команды. Пример:\n<code>/think какая скорость света?</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    await handle_think_logic(update, context, query)
 
 # ---------------------------------------------------------------------------
 # Генерация картинок: /image
 # ---------------------------------------------------------------------------
-async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
     user_id = update.effective_user.id
-    prompt = " ".join(context.args).strip()
-    if not prompt:
-        await update.message.reply_text(
-            "✏️ Напишите описание картинки. Пример:\n<code>/image котик на космолете</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
 
-    # 1. Перевод на английский язык, если есть русские буквы
     is_russian = bool(re.search('[а-яА-Я]', prompt))
     english_prompt = prompt
     if is_russian:
-        translation_prompt = (
-            f"Translate the following user prompt for image generation into a detailed, high-quality English prompt. "
-            f"Maintain the core style and meaning. Output ONLY the English prompt text, no explanations, no quotes, no extra text.\n\n"
-            f"Prompt to translate: {prompt}"
-        )
+        translation_prompt = f"Translate to English: {prompt}"
         try:
             mode = user_mode.get(user_id, "default")
             if mode == "claude":
-                translation = await call_external_llm("openrouter", "anthropic/claude-opus-4.8", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
+                translation = await call_external_llm("openrouter", "anthropic/claude-opus", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
             else:
-                if os.environ.get("OMNIRUTE_API_KEY"):
-                    translation = await call_external_llm("omniroute", "antigravity/gemini-3.1-flash-lite", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
-                else:
-                    response = gemini_generate([{"role": "user", "parts": [{"text": translation_prompt}]}], types.GenerateContentConfig(max_output_tokens=256))
-                    translation = response.text
+                response = gemini_generate([{"role": "user", "parts": [{"text": translation_prompt}]}], types.GenerateContentConfig(max_output_tokens=256))
+                translation = response.text
             if translation:
                 english_prompt = translation.strip()
-                logger.info("Translated prompt: '%s' -> '%s'", prompt, english_prompt)
         except Exception as e:
             logger.warning("Failed to translate prompt: %s", e)
 
     tmp_path = None
-    # 2. Вызываем генерацию через OpenRouter с моделью sourceful/riverflow-v2.5-fast
     try:
-        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        if not openrouter_key:
-            raise ValueError("OPENROUTER_API_KEY не настроен")
-
         url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {openrouter_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/vanyk56/Gemini-Chatbot",
-            "X-Title": "Telegram Bot"
-        }
-        payload = {
-            "model": "sourceful/riverflow-v2.5-fast",
-            "messages": [{"role": "user", "content": english_prompt}],
-            "modalities": ["image"]
-        }
+        headers = {"Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY')}", "Content-Type": "application/json"}
+        payload = {"model": "sourceful/riverflow-v2.5-fast", "messages": [{"role": "user", "content": english_prompt}], "modalities": ["image"]}
 
         async with httpx.AsyncClient(timeout=90.0) as client_http:
             response = await client_http.post(url, json=payload, headers=headers)
-            if response.status_code != 200:
-                raise Exception(f"OpenRouter API error {response.status_code}: {response.text}")
-            
             resp_data = response.json()
-            choices = resp_data.get("choices", [])
-            if not choices:
-                raise ValueError("No choices in OpenRouter response")
-            
-            msg_data = choices[0].get("message", {})
-            images = msg_data.get("images", [])
-            if not images:
-                content = msg_data.get("content", "")
-                if "data:image/" in content:
-                    img_url = content
-                else:
-                    raise ValueError("No generated images returned in response")
-            else:
-                img_url = images[0].get("image_url", {}).get("url", "")
-
-            if not img_url.startswith("data:image/"):
-                raise ValueError("Generated image URL is not in base64 format")
-
-            header, base64_data = img_url.split(",", 1)
-            image_bytes = base64.b64decode(base64_data)
-
+            img_url = resp_data.get("choices", [{}])[0].get("message", {}).get("images", [{}])[0].get("image_url", {}).get("url", "")
+            if not img_url.startswith("data:image/"): raise ValueError("Invalid image")
+            image_bytes = base64.b64decode(img_url.split(",", 1)[1])
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 tmp.write(image_bytes)
                 tmp_path = tmp.name
-
     except Exception as exc:
-        logger.error("Ошибка генерации через OpenRouter: %s", exc)
-        # Резервный Pollinations AI
-        logger.info("Переключение на Pollinations AI...")
-        try:
-            encoded_prompt = urllib.parse.quote(english_prompt)
-            pollinations_url = f"https://image.pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&nologo=true"
-            async with httpx.AsyncClient(timeout=60.0) as client_http:
-                response = await client_http.get(pollinations_url)
-                if response.status_code != 200:
-                    raise Exception(f"Pollinations AI returned {response.status_code}")
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                    tmp.write(response.content)
-                    tmp_path = tmp.name
-        except Exception as exc2:
-            logger.error("Ошибка Pollinations AI: %s", exc2)
-            await update.message.reply_text("⚠️ Не удалось сгенерировать изображение.")
-            return
+        logger.error("Ошибка генерации: %s", exc)
+        await update.message.reply_text("⚠️ Не удалось сгенерировать изображение.")
+        return
 
-    # Отправка фото
     try:
         with open(tmp_path, "rb") as f:
-            await update.message.reply_photo(
-                photo=f,
-                caption=f"🎨 <b>Запрос:</b> {prompt}\n🇬🇧 <b>Промпт:</b> {english_prompt}",
-                parse_mode=ParseMode.HTML
-            )
-    except Exception as e:
-        logger.error("Ошибка отправки фото: %s", e)
-        await update.message.reply_text("⚠️ Ошибка при отправке изображения.")
+            await update.message.reply_photo(photo=f, caption=f"🎨 <b>Запрос:</b> {prompt}", parse_mode=ParseMode.HTML)
     finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+        if tmp_path: os.unlink(tmp_path)
+
+async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    prompt = " ".join(context.args).strip()
+    if not prompt:
+        await update.message.reply_text("✏️ Напишите описание картинки.", parse_mode=ParseMode.HTML)
+        return
+    await handle_image_logic(update, context, prompt)
 
 # ---------------------------------------------------------------------------
 # Интеграция с Telegram Business: включение/выключение чатов
@@ -944,17 +880,110 @@ async def cmd_automate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ---------------------------------------------------------------------------
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     user_id = query.from_user.id
     data = query.data
 
     if data == "menu:close":
         await query.message.delete()
+        await query.answer()
+        return
+
+    if data == "menu:back":
+        user_state.pop(user_id, None)
+        user = query.from_user
+        text = (
+            f"Привет, {user.first_name}! 👋\n"
+            "Я умный ИИ-собеседник <b>SYNAPSE</b>.\n\n"
+            "Выберите модель или воспользуйтесь функциями ниже:"
+        )
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_keyboard(user_id)
+        )
+        await query.answer()
+        return
+
+    if data == "action:think":
+        user_state[user_id] = "awaiting_think"
+        await query.edit_message_text(
+            "🧠 <b>Режим глубокого мышления активирован.</b>\n\n"
+            "Отправьте ваш вопрос следующим сообщением (без команды /think).",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")
+            ]])
+        )
+        await query.answer()
+        return
+
+    if data == "action:image":
+        user_state[user_id] = "awaiting_image"
+        await query.edit_message_text(
+            "🎨 <b>Режим генерации изображений активирован.</b>\n\n"
+            "Отправьте описание картинки следующим сообщением (без команды /image).",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")
+            ]])
+        )
+        await query.answer()
+        return
+
+    if data == "action:settings":
+        settings = get_settings(user_id)
+        mode = user_mode.get(user_id, "default")
+        auto = settings.get("auto_reply", True)
+        max_h = settings.get("max_history", 10)
+        persona = settings.get("persona", "")
+
+        mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
+        auto_label = "✅ Вкл" if auto else "❌ Выкл"
+        persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
+
+        text = (
+            "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
+            f"🗂 Режим чата: <b>{mode_label}</b>\n"
+            f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
+            f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
+            f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
+            "Используйте /persona для настройки личности."
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+            ],
+            [
+                InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
+                InlineKeyboardButton("📝 История: 20", callback_data="settings:max_history:20"),
+                InlineKeyboardButton("📝 История: 50", callback_data="settings:max_history:50"),
+            ],
+            [
+                InlineKeyboardButton("🎭 Изменить личность", callback_data="persona:prompt"),
+                InlineKeyboardButton("🗑️ Сбросить личность", callback_data="persona:reset"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")],
+        ])
+
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await query.answer()
         return
 
     if data == "history:clear":
         clear_user(user_id)
-        await query.edit_message_text("🗑️ История диалога очищена!")
+        await query.answer("История очищена!")
+        user = query.from_user
+        text = (
+            f"Привет, {user.first_name}! 👋\n"
+            "Я умный ИИ-собеседник <b>SYNAPSE</b>.\n\n"
+            "Выберите модель или воспользуйтесь функциями ниже:"
+        )
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_keyboard(user_id)
+        )
         return
 
     if data == "history:keep5":
@@ -963,15 +992,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if len(history) > 10:
             conversation_history[str(user_id)] = history[-10:]
             conversation_timestamps[str(user_id)] = timestamps[-10:]
-        await query.edit_message_text("✂️ Оставлены последние 5 обменов.")
+        await query.answer("Оставлены последние 5 обменов.")
         return
 
     if data.startswith("mode:"):
         new_mode = data.split(":")[1]
         conversation_history.pop(str(user_id), None)
         set_user_mode(user_id, new_mode)
-        label = {"default": "Gemini (Omni)", "claude": "Claude (OpenRouter)"}.get(new_mode, new_mode)
-        await query.edit_message_text(f"✅ Режим изменён на {label}.")
+        label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(new_mode, new_mode)
+        
+        await query.edit_message_reply_markup(reply_markup=get_main_keyboard(user_id))
+        await query.answer(f"Режим изменен на {label}")
         return
 
     if data.startswith("settings:"):
@@ -983,15 +1014,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if key == "auto_reply" and val == "toggle":
             settings["auto_reply"] = not settings.get("auto_reply", True)
             _save_settings()
-            status = "включён" if settings["auto_reply"] else "выключен"
-            await query.edit_message_text(f"🔄 Авто-ответ в бизнес-чатах {status}.")
-            return
-
-        if key == "max_history" and val:
+            status = "включен" if settings["auto_reply"] else "выключен"
+            await query.answer(f"Авто-ответ {status}.")
+        elif key == "max_history" and val:
             settings["max_history"] = int(val)
             _save_settings()
-            await query.edit_message_text(f"📝 Лимит истории установлен: {val} сообщений.")
-            return
+            await query.answer(f"Лимит истории: {val} сообщений.")
+
+        mode = user_mode.get(user_id, "default")
+        auto = settings.get("auto_reply", True)
+        max_h = settings.get("max_history", 10)
+        persona = settings.get("persona", "")
+        mode_label = {"default": "Gemini", "claude": "Claude Opus"}.get(mode, mode)
+        auto_label = "✅ Вкл" if auto else "❌ Выкл"
+        persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
+
+        text = (
+            "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
+            f"🗂 Режим чата: <b>{mode_label}</b>\n"
+            f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
+            f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
+            f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
+            "Используйте /persona для настройки личности."
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+            ],
+            [
+                InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
+                InlineKeyboardButton("📝 История: 20", callback_data="settings:max_history:20"),
+                InlineKeyboardButton("📝 История: 50", callback_data="settings:max_history:50"),
+            ],
+            [
+                InlineKeyboardButton("🎭 Изменить личность", callback_data="persona:prompt"),
+                InlineKeyboardButton("🗑️ Сбросить личность", callback_data="persona:reset"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")],
+        ])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
 
     if data.startswith("persona:"):
         action = data.split(":")[1]
@@ -999,13 +1062,52 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if action == "reset":
             settings.pop("persona", None)
             _save_settings()
-            await query.edit_message_text("🗑️ Личность авто-ответчика сброшена.")
+            await query.answer("Личность сброшена.")
         elif action == "prompt":
             await query.edit_message_text(
                 "🎭 Отправьте команду с описанием себя:\n\n"
                 "<code>/persona Меня зовут Артём, мне 19 лет. Учусь в универе, увлекаюсь музыкой.</code>",
                 parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")
+                ]])
             )
+            await query.answer()
+            return
+
+        mode = user_mode.get(user_id, "default")
+        auto = settings.get("auto_reply", True)
+        max_h = settings.get("max_history", 10)
+        persona = settings.get("persona", "")
+        mode_label = {"default": "Gemini", "claude": "Claude Opus"}.get(mode, mode)
+        auto_label = "✅ Вкл" if auto else "❌ Выкл"
+        persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
+
+        text = (
+            "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
+            f"🗂 Режим чата: <b>{mode_label}</b>\n"
+            f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
+            f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
+            f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
+            "Используйте /persona для настройки личности."
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+            ],
+            [
+                InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
+                InlineKeyboardButton("📝 История: 20", callback_data="settings:max_history:20"),
+                InlineKeyboardButton("📝 История: 50", callback_data="settings:max_history:50"),
+            ],
+            [
+                InlineKeyboardButton("🎭 Изменить личность", callback_data="persona:prompt"),
+                InlineKeyboardButton("🗑️ Сбросить личность", callback_data="persona:reset"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")],
+        ])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         return
 
 # ---------------------------------------------------------------------------
@@ -1296,6 +1398,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_text = update.message.text or ""
+
+    # Проверяем состояние ожидания ввода ( think / image )
+    state = user_state.pop(user_id, None)
+    if state == "awaiting_think":
+        await handle_think_logic(update, context, user_text)
+        return
+    elif state == "awaiting_image":
+        await handle_image_logic(update, context, user_text)
+        return
+
     chat_type = update.effective_chat.type
     mode = user_mode.get(user_id, "default")
 
@@ -1449,14 +1561,14 @@ async def post_init(app) -> None:
     """Устанавливает меню команд бота после запуска."""
     from telegram import BotCommand
     await app.bot.set_my_commands([
-        BotCommand("start",    "👋 Приветствие и список команд"),
-        BotCommand("gemini",   "💬 Gemini-3.1-lite (OmniRoute)"),
-        BotCommand("claude",   "🎭 Claude-Opus (OpenRouter)"),
-        BotCommand("think",    "🧠 Глубокий поиск (Fusion OpenRouter)"),
-        BotCommand("image",    "🎨 Генерация картинок (Riverflow OR)"),
-        BotCommand("history",  "📜 Управление историей диалога"),
+        BotCommand("start",    "👋 Главное меню бота"),
+        BotCommand("gemini",   "🤖 Режим Gemini (Бесплатно)"),
+        BotCommand("claude",   "👑 Режим Claude Opus (Премиум)"),
+        BotCommand("think",    "🧠 Глубокое мышление"),
+        BotCommand("image",    "🎨 Генерация картинок"),
+        BotCommand("history",  "📜 Управление историей"),
         BotCommand("settings", "⚙️ Настройки бота"),
-        BotCommand("reset",    "🗑️ Очистить историю диалога"),
+        BotCommand("reset",    "🗑️ Очистить историю"),
     ])
     logger.info("Меню команд обновлено.")
 
