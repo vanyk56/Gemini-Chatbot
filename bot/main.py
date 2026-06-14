@@ -278,7 +278,7 @@ def latex_to_text(text: str) -> str:
 
     text = re.sub(r"\^\{([^}]+)\}", lambda m: f"^{m.group(1)}", text)
     text = re.sub(r"_\{([^}]+)\}", lambda m: f"_{m.group(1)}", text)
-    text = re.sub(r"\llcorner[a-zA-Z]+", "", text)
+    text = re.sub(r"\\llcorner[a-zA-Z]+", "", text)
     text = re.sub(r"[{}]", "", text)
     text = re.sub(r"\$([^$\n]+)\$", lambda m: m.group(1).strip(), text)
     return text
