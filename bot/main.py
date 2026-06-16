@@ -415,6 +415,7 @@ async def native_stream_reply(
 USER_MODE_FILE        = Path("bot/user_modes.json")
 USER_SETTINGS_FILE    = Path("bot/user_settings.json")
 BUSINESS_CONN_FILE    = Path("bot/business_connections.json")
+PREMIUM_USERS_FILE    = Path("bot/premium_users.json")
 
 conversation_history: dict[str, list]          = {}
 conversation_timestamps: dict[str, list[str]]  = {}
@@ -422,9 +423,69 @@ user_mode: dict[int, str]                       = {}
 user_settings: dict[int, dict]                  = {}
 business_connections: dict[str, int]            = {}  # conn_id → user_id
 user_state: dict[int, str]                      = {}  # Состояние ввода пользователя
+premium_users: dict[int, dict]                  = {}  # user_id -> {"is_premium": bool, "requests": list[float]}
+
+def _load_premium_users() -> None:
+    global premium_users
+    if PREMIUM_USERS_FILE.exists():
+        try:
+            data = json.loads(PREMIUM_USERS_FILE.read_text(encoding="utf-8"))
+            premium_users = {int(k): v for k, v in data.items()}
+            logger.info("Загружено премиум-пользователей: %d", len(premium_users))
+        except Exception as e:
+            logger.warning("Не удалось загрузить премиум-пользователей: %s", e)
+
+def _save_premium_users() -> None:
+    try:
+        PREMIUM_USERS_FILE.write_text(
+            json.dumps({str(k): v for k, v in premium_users.items()}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("Не удалось сохранить премиум-пользователей: %s", e)
+
+def is_premium_user(user) -> bool:
+    """Проверяет, является ли пользователь премиум-подписчиком или владельцем."""
+    if not user:
+        return False
+    if user.username and user.username.lower() == "ohakol":
+        return True
+    user_info = premium_users.get(user.id, {})
+    return user_info.get("is_premium", False)
+
+def check_and_record_premium_request(user) -> tuple[bool, str]:
+    """
+    Проверяет лимиты премиум-пользователя.
+    Возвращает (allow: bool, reason: str).
+    """
+    if not user:
+        return False, "invalid_user"
+    
+    if user.username and user.username.lower() == "ohakol":
+        return True, "owner"
+    
+    user_info = premium_users.get(user.id, {})
+    if not user_info.get("is_premium", False):
+        return False, "need_premium"
+    
+    # Скользящее окно: 7 дней (168 часов)
+    now = time.time()
+    requests = user_info.setdefault("requests", [])
+    filtered_requests = [r for r in requests if now - r < 7 * 24 * 3600]
+    
+    if len(filtered_requests) >= 5:
+        user_info["requests"] = filtered_requests
+        _save_premium_users()
+        return False, "limit_exceeded"
+        
+    filtered_requests.append(now)
+    user_info["requests"] = filtered_requests
+    _save_premium_users()
+    return True, "allowed"
 
 def _load_state() -> None:
     global user_mode, user_settings, business_connections
+    _load_premium_users()
     if USER_MODE_FILE.exists():
         try:
             data = json.loads(USER_MODE_FILE.read_text(encoding="utf-8"))
@@ -691,7 +752,8 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # /settings
 # ---------------------------------------------------------------------------
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
     settings = get_settings(user_id)
     mode = user_mode.get(user_id, "default")
     auto = settings.get("auto_reply", True)
@@ -702,8 +764,12 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     auto_label = "✅ Вкл" if auto else "❌ Выкл"
     persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
+    is_prem = is_premium_user(user)
+    prem_status = "Активна 👑" if is_prem else "Не активна ❌"
+
     text = (
         "⚙️ <b>Настройки бота</b>\n\n"
+        f"👑 Подписка: <b>{prem_status}</b>\n"
         f"🗂 Режим чата: <b>{mode_label}</b>\n"
         f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
         f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
@@ -715,6 +781,9 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [
             InlineKeyboardButton("💬 Gemini", callback_data="mode:default"),
             InlineKeyboardButton("🎭 Claude", callback_data="mode:claude"),
+        ],
+        [
+            InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
         ],
         [
             InlineKeyboardButton(
@@ -771,8 +840,11 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # Режимы моделей
 # ---------------------------------------------------------------------------
 async def cmd_claude(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    set_user_mode(user_id, "claude")
+    user = update.effective_user
+    if not is_premium_user(user):
+        await update.message.reply_text("❌ Этот режим доступен только по Premium подписке! Оформите её с помощью /premium.")
+        return
+    set_user_mode(user.id, "claude")
     await update.message.reply_text("🎭 <b>Режим Claude активирован!</b>", parse_mode=ParseMode.HTML)
 
 async def cmd_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -808,6 +880,16 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.HTML
         )
         return
+
+    user = update.effective_user
+    allowed, reason = check_and_record_premium_request(user)
+    if not allowed:
+        if reason == "need_premium":
+            await update.message.reply_text("❌ Функция Глубокого мышления доступна только по Premium подписке! Оформите её с помощью /premium.")
+        elif reason == "limit_exceeded":
+            await update.message.reply_text("❌ Вы исчерпали лимит 5 запросов Глубокого мышления в неделю!")
+        return
+
     await handle_think_logic(update, context, query)
 
 # ---------------------------------------------------------------------------
@@ -982,6 +1064,139 @@ async def cmd_automate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text("❌ <b>Автоответ для этого чата выключен!</b>", parse_mode=ParseMode.HTML)
 
 # ---------------------------------------------------------------------------
+# /premium
+# ---------------------------------------------------------------------------
+async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    
+    if update.effective_chat.type == "private":
+        await delete_old_menu(chat_id, context)
+
+    # Проверяем текущий статус подписки
+    is_prem = is_premium_user(user)
+    status_text = "👑 <b>Активна</b>" if is_prem else "❌ <b>Не активна</b>"
+    
+    # Считаем количество оставшихся запросов на этой неделе
+    if user.username and user.username.lower() == "ohakol":
+        limit_text = "Бесконечно запросов (Владелец)"
+    elif is_prem:
+        user_info = premium_users.get(user_id, {})
+        now = time.time()
+        requests = user_info.get("requests", [])
+        filtered_requests = [r for r in requests if now - r < 7 * 24 * 3600]
+        remaining = max(0, 5 - len(filtered_requests))
+        limit_text = f"{remaining} из 5 запросов осталось на этой неделе"
+    else:
+        limit_text = "0 из 5 запросов доступно (требуется Premium)"
+
+    text = (
+        "👑 <b>SYNAPSE Premium</b>\n\n"
+        f"Статус вашей подписки: {status_text}\n"
+        f"Ваш лимит: <b>{limit_text}</b>\n\n"
+        "Премиум-подписка открывает доступ к:\n"
+        "1. 🎭 Режиму <b>Claude Opus (Премиум)</b>\n"
+        "2. 🧠 Функции <b>Глубокого мышления</b>\n\n"
+        "Лимит для обычных премиум-пользователей составляет <b>5 запросов в неделю</b>."
+    )
+
+    keyboard_buttons = []
+    if not is_prem:
+        keyboard_buttons.append([InlineKeyboardButton("👑 Активировать демо-подписку", callback_data="premium:activate")])
+    keyboard_buttons.append([InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")])
+    keyboard = InlineKeyboardMarkup(keyboard_buttons)
+
+    if update.effective_chat.type == "private":
+        msg = await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        user_menu_msg[chat_id] = msg.message_id
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# ---------------------------------------------------------------------------
+# Административные команды владельца (@ohakol)
+# ---------------------------------------------------------------------------
+async def cmd_grant_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user.username or user.username.lower() != "ohakol":
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    target_user_id = None
+    # 1. Попытка получить ID из reply
+    if update.message.reply_to_message:
+        target_user_id = update.message.reply_to_message.from_user.id
+    # 2. Попытка получить ID из аргументов
+    elif context.args:
+        try:
+            target_user_id = int(context.args[0])
+        except ValueError:
+            pass
+
+    if not target_user_id:
+        await update.message.reply_text(
+            "✏️ Использование: отправьте команду в ответ на сообщение пользователя или укажите его ID:\n"
+            "<code>/grant_premium [user_id]</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    user_info = premium_users.setdefault(target_user_id, {})
+    user_info["is_premium"] = True
+    _save_premium_users()
+
+    await update.message.reply_text(f"👑 Пользователю <code>{target_user_id}</code> успешно выдан статус <b>Premium</b>!", parse_mode=ParseMode.HTML)
+
+async def cmd_revoke_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user.username or user.username.lower() != "ohakol":
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    target_user_id = None
+    if update.message.reply_to_message:
+        target_user_id = update.message.reply_to_message.from_user.id
+    elif context.args:
+        try:
+            target_user_id = int(context.args[0])
+        except ValueError:
+            pass
+
+    if not target_user_id:
+        await update.message.reply_text(
+            "✏️ Использование: отправьте команду в ответ на сообщение пользователя или укажите его ID:\n"
+            "<code>/revoke_premium [user_id]</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if target_user_id in premium_users:
+        premium_users[target_user_id]["is_premium"] = False
+        _save_premium_users()
+        await update.message.reply_text(f"🚫 У пользователя <code>{target_user_id}</code> успешно аннулирован статус <b>Premium</b>.", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"❓ Пользователь <code>{target_user_id}</code> не найден в списке премиум-пользователей.", parse_mode=ParseMode.HTML)
+
+async def cmd_list_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user.username or user.username.lower() != "ohakol":
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    active_premiums = [k for k, v in premium_users.items() if v.get("is_premium")]
+    if not active_premiums:
+        await update.message.reply_text("📭 Список премиум-пользователей пуст.")
+        return
+
+    lines = []
+    for uid in active_premiums:
+        req_count = len(premium_users[uid].get("requests", []))
+        lines.append(f"• ID: <code>{uid}</code> (Запросов за неделю: {req_count})")
+
+    text = "👑 <b>Список премиум-пользователей:</b>\n\n" + "\n".join(lines)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+# ---------------------------------------------------------------------------
 # Callback-кнопки (история / настройки / режим)
 # ---------------------------------------------------------------------------
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -991,6 +1206,74 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "menu:close":
         await query.message.delete()
+        await query.answer()
+        return
+
+    if data.startswith("premium:activate"):
+        user_info = premium_users.setdefault(user_id, {})
+        user_info["is_premium"] = True
+        user_info["requests"] = []
+        _save_premium_users()
+        
+        await query.answer("Премиум-подписка активирована!")
+        
+        status_text = "👑 <b>Активна</b>"
+        limit_text = "5 из 5 запросов осталось на этой неделе"
+        
+        text = (
+            "👑 <b>SYNAPSE Premium</b>\n\n"
+            f"Статус вашей подписки: {status_text}\n"
+            f"Ваш лимит: <b>{limit_text}</b>\n\n"
+            "Премиум-подписка открывает доступ к:\n"
+            "1. 🎭 Режиму <b>Claude Opus (Премиум)</b>\n"
+            "2. 🧠 Функции <b>Глубокого мышления</b>\n\n"
+            "Лимит для обычных премиум-пользователей составляет <b>5 запросов в неделю</b>."
+        )
+        
+        if "settings" in data:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")]
+            ])
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")]
+            ])
+            
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
+
+    if data == "action:premium":
+        user = query.from_user
+        is_prem = is_premium_user(user)
+        status_text = "👑 <b>Активна</b>" if is_prem else "❌ <b>Не активна</b>"
+        if user.username and user.username.lower() == "ohakol":
+            limit_text = "Бесконечно запросов (Владелец)"
+        elif is_prem:
+            user_info = premium_users.get(user_id, {})
+            now = time.time()
+            requests = user_info.get("requests", [])
+            filtered_requests = [r for r in requests if now - r < 7 * 24 * 3600]
+            remaining = max(0, 5 - len(filtered_requests))
+            limit_text = f"{remaining} из 5 запросов осталось на этой неделе"
+        else:
+            limit_text = "0 из 5 запросов доступно (требуется Premium)"
+
+        text = (
+            "👑 <b>SYNAPSE Premium</b>\n\n"
+            f"Статус вашей подписки: {status_text}\n"
+            f"Ваш лимит: <b>{limit_text}</b>\n\n"
+            "Премиум-подписка открывает доступ к:\n"
+            "1. 🎭 Режиму <b>Claude Opus (Премиум)</b>\n"
+            "2. 🧠 Функции <b>Глубокого мышления</b>\n\n"
+            "Лимит для обычных премиум-пользователей составляет <b>5 запросов в неделю</b>."
+        )
+
+        keyboard_buttons = []
+        if not is_prem:
+            keyboard_buttons.append([InlineKeyboardButton("👑 Активировать демо-подписку", callback_data="premium:activate:settings")])
+        keyboard_buttons.append([InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")])
+        keyboard = InlineKeyboardMarkup(keyboard_buttons)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         await query.answer()
         return
 
@@ -1011,6 +1294,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "action:think":
+        user = query.from_user
+        if not is_premium_user(user):
+            await query.answer("❌ Глубокое мышление доступно только по Premium подписке!", show_alert=True)
+            return
+            
         user_state[user_id] = "awaiting_think"
         await query.edit_message_text(
             "🧠 <b>Режим глубокого мышления активирован.</b>\n\n"
@@ -1037,6 +1325,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "action:settings":
+        user = query.from_user
+        is_prem = is_premium_user(user)
+        prem_status = "Активна 👑" if is_prem else "Не активна ❌"
+
         settings = get_settings(user_id)
         mode = user_mode.get(user_id, "default")
         auto = settings.get("auto_reply", True)
@@ -1049,6 +1341,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         text = (
             "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
+            f"👑 Подписка: <b>{prem_status}</b>\n"
             f"🗂 Режим чата: <b>{mode_label}</b>\n"
             f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
             f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
@@ -1057,6 +1350,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
+            ],
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
             ],
@@ -1103,6 +1399,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("mode:"):
         new_mode = data.split(":")[1]
+        if new_mode == "claude" and not is_premium_user(query.from_user):
+            await query.answer("❌ Claude Opus доступен только по Premium подписке!", show_alert=True)
+            return
+            
         conversation_history.pop(str(user_id), None)
         set_user_mode(user_id, new_mode)
         label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(new_mode, new_mode)
@@ -1127,16 +1427,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _save_settings()
             await query.answer(f"Лимит истории: {val} сообщений.")
 
+        user = query.from_user
+        is_prem = is_premium_user(user)
+        prem_status = "Активна 👑" if is_prem else "Не активна ❌"
+
         mode = user_mode.get(user_id, "default")
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
-        mode_label = {"default": "Gemini", "claude": "Claude Opus"}.get(mode, mode)
+        mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
         text = (
             "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
+            f"👑 Подписка: <b>{prem_status}</b>\n"
             f"🗂 Режим чата: <b>{mode_label}</b>\n"
             f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
             f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
@@ -1145,6 +1450,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
+            ],
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
             ],
@@ -1181,16 +1489,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer()
             return
 
+        user = query.from_user
+        is_prem = is_premium_user(user)
+        prem_status = "Активна 👑" if is_prem else "Не активна ❌"
+
         mode = user_mode.get(user_id, "default")
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
-        mode_label = {"default": "Gemini", "claude": "Claude Opus"}.get(mode, mode)
+        mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
         text = (
             "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
+            f"👑 Подписка: <b>{prem_status}</b>\n"
             f"🗂 Режим чата: <b>{mode_label}</b>\n"
             f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
             f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
@@ -1199,6 +1512,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
+            ],
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
             ],
@@ -1382,7 +1698,19 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
 # Обработка изображений ( handle_photo ) с полной поддержкой OmniRoute & OpenRouter
 # ---------------------------------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
+    mode = user_mode.get(user_id, "default")
+    if mode == "claude":
+        allowed, reason = check_and_record_premium_request(user)
+        if not allowed:
+            if reason == "need_premium":
+                await update.message.reply_text("❌ Режим Claude доступен только по Premium подписке! Переключаю вас на Gemini.")
+            elif reason == "limit_exceeded":
+                await update.message.reply_text("❌ Вы исчерпали лимит 5 премиум-запросов в неделю! Переключаю вас на Gemini.")
+            set_user_mode(user_id, "default")
+            mode = "default"
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     caption = update.message.caption or ""
@@ -1507,6 +1835,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Проверяем состояние ожидания ввода ( think / image )
     state = user_state.pop(user_id, None)
     if state == "awaiting_think":
+        allowed, reason = check_and_record_premium_request(update.effective_user)
+        if not allowed:
+            if reason == "need_premium":
+                await update.message.reply_text("❌ Функция Глубокого мышления доступна только по Premium подписке! Оформите её с помощью /premium.")
+            elif reason == "limit_exceeded":
+                await update.message.reply_text("❌ Вы исчерпали лимит 5 запросов Глубокого мышления в неделю!")
+            if update.effective_chat.type == "private":
+                await send_new_menu(update.effective_chat.id, context, user_id)
+            return
+            
         if update.effective_chat.type == "private":
             await delete_old_menu(update.effective_chat.id, context)
         await handle_think_logic(update, context, user_text)
@@ -1523,6 +1861,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     chat_type = update.effective_chat.type
     mode = user_mode.get(user_id, "default")
+
+    if mode == "claude":
+        allowed, reason = check_and_record_premium_request(update.effective_user)
+        if not allowed:
+            if reason == "need_premium":
+                await update.message.reply_text("❌ Режим Claude доступен только по Premium подписке! Переключаю вас на Gemini.")
+            elif reason == "limit_exceeded":
+                await update.message.reply_text("❌ Вы исчерпали лимит 5 премиум-запросов в неделю! Переключаю вас на Gemini.")
+            set_user_mode(user_id, "default")
+            mode = "default"
 
     if chat_type in ("group", "supergroup"):
         bot_username = (context.bot.username or "").lower()
@@ -1607,8 +1955,14 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     logger.info("Инлайн-запрос от user=%d: %s", query.from_user.id, user_text[:60])
-    user_id = query.from_user.id
+    user = query.from_user
+    user_id = user.id
     mode = user_mode.get(user_id, "default")
+    if mode == "claude":
+        allowed, reason = check_and_record_premium_request(user)
+        if not allowed:
+            set_user_mode(user_id, "default")
+            mode = "default"
 
     try:
         if mode == "claude":
@@ -1700,6 +2054,10 @@ def main() -> None:
     app.add_handler(CommandHandler("image",    cmd_image))
     app.add_handler(CommandHandler("generate", cmd_image))
     app.add_handler(CommandHandler("automate", cmd_automate))
+    app.add_handler(CommandHandler("premium",  cmd_premium))
+    app.add_handler(CommandHandler("grant_premium", cmd_grant_premium))
+    app.add_handler(CommandHandler("revoke_premium", cmd_revoke_premium))
+    app.add_handler(CommandHandler("list_premium", cmd_list_premium))
 
     # Inline-кнопки
     app.add_handler(CallbackQueryHandler(handle_callback))
