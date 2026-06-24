@@ -11,5 +11,7 @@ dependencies = [
     "pillow>=12.2.0",
     "pypdf>=6.10.2",
     "pytesseract>=0.3.13",
+    "apscheduler>=3.10.1",
     "python-telegram-bot>=22.7",
 ]
+

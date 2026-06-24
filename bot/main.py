@@ -416,6 +416,7 @@ USER_MODE_FILE        = Path("bot/user_modes.json")
 USER_SETTINGS_FILE    = Path("bot/user_settings.json")
 BUSINESS_CONN_FILE    = Path("bot/business_connections.json")
 PREMIUM_USERS_FILE    = Path("bot/premium_users.json")
+SCHEDULED_TASKS_FILE  = Path("bot/scheduled_tasks.json")
 
 conversation_history: dict[str, list]          = {}
 conversation_timestamps: dict[str, list[str]]  = {}
@@ -424,6 +425,25 @@ user_settings: dict[int, dict]                  = {}
 business_connections: dict[str, int]            = {}  # conn_id → user_id
 user_state: dict[int, str]                      = {}  # Состояние ввода пользователя
 premium_users: dict[int, dict]                  = {}  # user_id -> {"is_premium": bool, "requests": list[float]}
+user_schedule_drafts: dict[int, dict]           = {}  # user_id -> черновик отложенного сообщения
+
+def _load_scheduled_tasks() -> list:
+    if SCHEDULED_TASKS_FILE.exists():
+        try:
+            return json.loads(SCHEDULED_TASKS_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("Не удалось загрузить отложенные сообщения: %s", e)
+    return []
+
+def _save_scheduled_tasks(tasks: list) -> None:
+    try:
+        SCHEDULED_TASKS_FILE.write_text(
+            json.dumps(tasks, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("Не удалось сохранить отложенные сообщения: %s", e)
+
 
 def _load_premium_users() -> None:
     global premium_users
@@ -784,6 +804,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ],
         [
             InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
+            InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
         ],
         [
             InlineKeyboardButton(
@@ -1114,6 +1135,78 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
+# Отложенные сообщения по расписанию: /schedule
+# ---------------------------------------------------------------------------
+async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_premium_user(user):
+        await update.message.reply_text("❌ Планирование сообщений доступно только по Premium подписке!")
+        return
+
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            "✏️ Использование: <code>/schedule [ДД.ММ.ГГГГ] [ЧЧ:ММ] [Текст сообщения]</code>\n"
+            "Пример: <code>/schedule 24.06.2026 10:00 Привет, это запланированное сообщение!</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    date_str = args[0]
+    time_str = args[1]
+    msg_text = " ".join(args[2:])
+
+    try:
+        dt = datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат даты/времени. Используйте формат: ДД.ММ.ГГГГ ЧЧ:ММ.")
+        return
+
+    now = datetime.now()
+    if dt <= now:
+        await update.message.reply_text("❌ Время отправки должно быть в будущем.")
+        return
+
+    chat_id = update.effective_chat.id
+    conn_id = None
+
+    if update.business_message:
+        conn_id = update.business_message.business_connection_id
+    elif update.message and update.message.business_connection_id:
+        conn_id = update.message.business_connection_id
+
+    if not conn_id:
+        for cid, uid in business_connections.items():
+            if uid == user.id:
+                conn_id = cid
+                break
+
+    task_id = f"task_{int(dt.timestamp())}_{random.randint(1000, 9999)}"
+    task_data = {
+        "id": task_id,
+        "chat_id": chat_id,
+        "conn_id": conn_id,
+        "text": msg_text,
+        "run_at": dt.isoformat(),
+        "creator_id": user.id
+    }
+
+    tasks = _load_scheduled_tasks()
+    tasks.append(task_data)
+    _save_scheduled_tasks(tasks)
+
+    if context.job_queue:
+        context.job_queue.run_once(
+            send_scheduled_message_callback,
+            when=dt,
+            data=task_id,
+            name=task_id,
+            chat_id=chat_id
+        )
+
+    await update.message.reply_text(f"📅 Сообщение успешно запланировано на {date_str} {time_str}!")
+
+# ---------------------------------------------------------------------------
 # Административные команды владельца (@ohakol)
 # ---------------------------------------------------------------------------
 async def cmd_grant_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1203,6 +1296,138 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
+
+    if data == "settings:scheduler:menu":
+        user_state.pop(user_id, None)
+        user_schedule_drafts.pop(user_id, None)
+        
+        tasks = _load_scheduled_tasks()
+        user_tasks = [t for t in tasks if t.get("creator_id") == user_id]
+        
+        text = (
+            "📅 <b>Управление отложенными сообщениями</b>\n\n"
+            f"Запланировано сообщений: <b>{len(user_tasks)}</b>\n\n"
+            "Здесь вы можете запланировать автоматическую отправку сообщения в любой чат "
+            "(включая бизнес-чаты) в выбранное время."
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🆕 Запланировать новое", callback_data="settings:scheduler:create")],
+            [InlineKeyboardButton("📋 Список активных", callback_data="settings:scheduler:list")],
+            [InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")]
+        ])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await query.answer()
+        return
+
+    if data == "settings:scheduler:create":
+        if not is_premium_user(query.from_user):
+            await query.answer("❌ Планирование сообщений доступно только по Premium подписке!", show_alert=True)
+            return
+            
+        user_state[user_id] = "awaiting_schedule_chat"
+        user_schedule_drafts[user_id] = {}
+        
+        text = (
+            "📅 <b>Новое отложенное сообщение (Шаг 1 из 3)</b>\n\n"
+            "<b>Укажите получателя.</b>\n"
+            "Вы можете:\n"
+            "• Написать ID чата (например, <code>-10023456789</code> или ID пользователя)\n"
+            "• Написать юзернейм (например, <code>@username</code>)\n"
+            "• Переслать любое сообщение от пользователя/группы в этот чат с ботом\n\n"
+            "Отправьте данные следующим сообщением."
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="settings:scheduler:menu")
+        ]])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await query.answer()
+        return
+
+    if data == "settings:scheduler:list":
+        tasks = _load_scheduled_tasks()
+        user_tasks = [t for t in tasks if t.get("creator_id") == user_id]
+        
+        if not user_tasks:
+            text = "📋 <b>У вас нет активных отложенных сообщений.</b>"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🆕 Запланировать", callback_data="settings:scheduler:create")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="settings:scheduler:menu")]
+            ])
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            await query.answer()
+            return
+            
+        lines = []
+        keyboard_buttons = []
+        for i, t in enumerate(user_tasks[:5]):
+            dt = datetime.fromisoformat(t["run_at"])
+            dt_str = dt.strftime("%d.%m.%Y %H:%M")
+            preview = t["text"][:30] + ("..." if len(t["text"]) > 30 else "")
+            lines.append(
+                f"<b>{i+1}.</b> Получатель: <code>{t['chat_id']}</code>\n"
+                f"Время: <b>{dt_str}</b>\n"
+                f"Текст: <i>{preview}</i>\n"
+            )
+            keyboard_buttons.append([
+                InlineKeyboardButton(f"❌ Удалить #{i+1}", callback_data=f"scheduler:delete:{t['id']}")
+            ])
+            
+        text = "📋 <b>Список отложенных сообщений:</b>\n\n" + "\n".join(lines)
+        if len(user_tasks) > 5:
+            text += f"\n<i>Показано 5 из {len(user_tasks)} задач.</i>"
+            
+        keyboard_buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="settings:scheduler:menu")])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+        await query.answer()
+        return
+
+    if data.startswith("scheduler:delete:"):
+        task_id = data.split(":")[2]
+        
+        tasks = _load_scheduled_tasks()
+        tasks = [t for t in tasks if t["id"] != task_id]
+        _save_scheduled_tasks(tasks)
+        
+        if context.job_queue:
+            jobs = context.job_queue.get_jobs_by_name(task_id)
+            for j in jobs:
+                j.schedule_removal()
+                
+        await query.answer("Сообщение удалено!")
+        tasks = _load_scheduled_tasks()
+        user_tasks = [t for t in tasks if t.get("creator_id") == user_id]
+        
+        if not user_tasks:
+            text = "📋 <b>У вас нет активных отложенных сообщений.</b>"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🆕 Запланировать", callback_data="settings:scheduler:create")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="settings:scheduler:menu")]
+            ])
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            return
+            
+        lines = []
+        keyboard_buttons = []
+        for i, t in enumerate(user_tasks[:5]):
+            dt = datetime.fromisoformat(t["run_at"])
+            dt_str = dt.strftime("%d.%m.%Y %H:%M")
+            preview = t["text"][:30] + ("..." if len(t["text"]) > 30 else "")
+            lines.append(
+                f"<b>{i+1}.</b> Получатель: <code>{t['chat_id']}</code>\n"
+                f"Время: <b>{dt_str}</b>\n"
+                f"Текст: <i>{preview}</i>\n"
+            )
+            keyboard_buttons.append([
+                InlineKeyboardButton(f"❌ Удалить #{i+1}", callback_data=f"scheduler:delete:{t['id']}")
+            ])
+            
+        text = "📋 <b>Список отложенных сообщений:</b>\n\n" + "\n".join(lines)
+        if len(user_tasks) > 5:
+            text += f"\n<i>Показано 5 из {len(user_tasks)} задач.</i>"
+            
+        keyboard_buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="settings:scheduler:menu")])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+        return
 
     if data == "menu:close":
         await query.message.delete()
@@ -1352,6 +1577,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
+                InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
             ],
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
@@ -1452,6 +1678,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
+                InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
             ],
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
@@ -1514,6 +1741,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
+                InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
             ],
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
@@ -1832,8 +2060,122 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     user_text = update.message.text or ""
 
-    # Проверяем состояние ожидания ввода ( think / image )
+    # Проверяем состояние ожидания ввода ( think / image / scheduler )
     state = user_state.pop(user_id, None)
+    if state == "awaiting_schedule_chat":
+        chat_id = None
+        if update.message.forward_from_chat:
+            chat_id = update.message.forward_from_chat.id
+        elif update.message.forward_from:
+            chat_id = update.message.forward_from.id
+        else:
+            text_input = user_text.strip()
+            if text_input.startswith("@"):
+                chat_id = text_input
+            else:
+                try:
+                    chat_id = int(text_input)
+                except ValueError:
+                    user_state[user_id] = state
+                    await update.message.reply_text("❌ Неверный формат получателя. Пожалуйста, отправьте числовой ID или юзернейм.")
+                    return
+
+        draft = user_schedule_drafts.setdefault(user_id, {})
+        draft["chat_id"] = chat_id
+
+        user_state[user_id] = "awaiting_schedule_time"
+        now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        await update.message.reply_text(
+            f"📅 <b>Новое отложенное сообщение (Шаг 2 из 3)</b>\n\n"
+            f"Получатель: <code>{chat_id}</code>\n\n"
+            f"Теперь укажите <b>дату и время отправки</b> в формате: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
+            f"Пример: <code>24.06.2026 15:30</code>\n\n"
+            f"Текущее время сервера: <b>{now_str}</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="settings:scheduler:menu")]])
+        )
+        return
+
+    elif state == "awaiting_schedule_time":
+        time_text = user_text.strip()
+        try:
+            dt = datetime.strptime(time_text, "%d.%m.%Y %H:%M")
+        except ValueError:
+            user_state[user_id] = state
+            await update.message.reply_text(
+                "❌ Неверный формат времени. Пожалуйста, введите дату и время в формате <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> (например, 24.06.2026 15:30).",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        now = datetime.now()
+        if dt <= now:
+            user_state[user_id] = state
+            await update.message.reply_text("❌ Время отправки должно быть в будущем. Попробуйте еще раз:")
+            return
+
+        draft = user_schedule_drafts.setdefault(user_id, {})
+        draft["run_at"] = dt.isoformat()
+
+        user_state[user_id] = "awaiting_schedule_text"
+        await update.message.reply_text(
+            f"📅 <b>Новое отложенное сообщение (Шаг 3 из 3)</b>\n\n"
+            f"Получатель: <code>{draft['chat_id']}</code>\n"
+            f"Время отправки: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
+            f"Теперь напишите <b>текст сообщения</b>, которое нужно отправить:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="settings:scheduler:menu")]])
+        )
+        return
+
+    elif state == "awaiting_schedule_text":
+        msg_text = user_text
+        draft = user_schedule_drafts.pop(user_id, {})
+
+        chat_id = draft.get("chat_id")
+        run_at_str = draft.get("run_at")
+        dt = datetime.fromisoformat(run_at_str)
+
+        conn_id = None
+        for cid, uid in business_connections.items():
+            if uid == user_id:
+                conn_id = cid
+                break
+
+        task_id = f"task_{int(dt.timestamp())}_{random.randint(1000, 9999)}"
+        task_data = {
+            "id": task_id,
+            "chat_id": chat_id,
+            "conn_id": conn_id,
+            "text": msg_text,
+            "run_at": run_at_str,
+            "creator_id": user_id
+        }
+
+        tasks = _load_scheduled_tasks()
+        tasks.append(task_data)
+        _save_scheduled_tasks(tasks)
+
+        if context.job_queue:
+            context.job_queue.run_once(
+                send_scheduled_message_callback,
+                when=dt,
+                data=task_id,
+                name=task_id,
+                chat_id=chat_id
+            )
+
+        await update.message.reply_text(
+            f"✅ <b>Сообщение успешно запланировано!</b>\n\n"
+            f"Получатель: <code>{chat_id}</code>\n"
+            f"Время: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
+            f"Текст: {msg_text}",
+            parse_mode=ParseMode.HTML
+        )
+
+        await send_new_menu(update.effective_chat.id, context, user_id)
+        return
+
     if state == "awaiting_think":
         allowed, reason = check_and_record_premium_request(update.effective_user)
         if not allowed:
@@ -2022,6 +2364,43 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------------------------------------
 # Точка входа
 # ---------------------------------------------------------------------------
+async def send_scheduled_message_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job = context.job
+    task_id = job.data
+
+    tasks = _load_scheduled_tasks()
+    task = next((t for t in tasks if t["id"] == task_id), None)
+    if not task:
+        logger.warning("Отложенная задача %s не найдена в базе!", task_id)
+        return
+
+    chat_id = task["chat_id"]
+    conn_id = task.get("conn_id")
+    text = task["text"]
+
+    logger.info("Выполнение отложенной отправки %s в чат %s", task_id, chat_id)
+
+    formatted = md_to_html(text)
+    parts = split_message(formatted)
+    for part in parts:
+        kwargs = {"parse_mode": ParseMode.HTML}
+        if conn_id:
+            kwargs["business_connection_id"] = conn_id
+        try:
+            target_chat = chat_id
+            if isinstance(chat_id, str) and not chat_id.startswith("@"):
+                try:
+                    target_chat = int(chat_id)
+                except ValueError:
+                    pass
+            await context.bot.send_message(chat_id=target_chat, text=part, **kwargs)
+        except Exception as e:
+            logger.error("Ошибка отправки отложенного сообщения в %s: %s", chat_id, e)
+
+    # Удаляем выполненную задачу
+    remaining_tasks = [t for t in tasks if t["id"] != task_id]
+    _save_scheduled_tasks(remaining_tasks)
+
 async def post_init(app) -> None:
     """Устанавливает меню команд бота после запуска."""
     from telegram import BotCommand
@@ -2033,15 +2412,40 @@ async def post_init(app) -> None:
         BotCommand("image",    "🎨 Генерация картинок"),
         BotCommand("history",  "📜 Управление историей"),
         BotCommand("settings", "⚙️ Настройки бота"),
+        BotCommand("schedule", "📅 Отложенное сообщение"),
         BotCommand("reset",    "🗑️ Очистить историю"),
     ])
     logger.info("Меню команд обновлено.")
+
+    # Восстановление отложенных сообщений из базы данных
+    if app.job_queue:
+        tasks = _load_scheduled_tasks()
+        now = datetime.now()
+        restored_count = 0
+        for task in tasks:
+            try:
+                run_at = datetime.fromisoformat(task["run_at"])
+                if run_at > now:
+                    app.job_queue.run_once(
+                        send_scheduled_message_callback,
+                        when=run_at,
+                        data=task["id"],
+                        name=task["id"],
+                        chat_id=task["chat_id"]
+                    )
+                    restored_count += 1
+                else:
+                    logger.info("Отложенное сообщение %s пропущено (время в прошлом)", task["id"])
+            except Exception as e:
+                logger.error("Ошибка при восстановлении задачи %s: %s", task.get("id"), e)
+        logger.info("Восстановлено отложенных сообщений: %d", restored_count)
+
 
 def main() -> None:
     logger.info("Запуск Telegram-бота...")
     _load_state()
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).job_queue().build()
 
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("reset",    cmd_reset))
@@ -2058,6 +2462,7 @@ def main() -> None:
     app.add_handler(CommandHandler("grant_premium", cmd_grant_premium))
     app.add_handler(CommandHandler("revoke_premium", cmd_revoke_premium))
     app.add_handler(CommandHandler("list_premium", cmd_list_premium))
+    app.add_handler(CommandHandler("schedule", cmd_schedule))
 
     # Inline-кнопки
     app.add_handler(CallbackQueryHandler(handle_callback))
