@@ -2445,7 +2445,7 @@ def main() -> None:
     logger.info("Запуск Telegram-бота...")
     _load_state()
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).job_queue().build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("reset",    cmd_reset))
