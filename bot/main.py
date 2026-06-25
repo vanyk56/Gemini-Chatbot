@@ -31,7 +31,9 @@ import tempfile
 import base64
 import urllib.parse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+tz_msk = timezone(timedelta(hours=3))
 
 import httpx
 from google import genai
@@ -1162,8 +1164,8 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("❌ Неверный формат даты/времени. Используйте формат: ДД.ММ.ГГГГ ЧЧ:ММ.")
         return
 
-    now = datetime.now()
-    if dt <= now:
+    now_msk = datetime.now(tz_msk).replace(tzinfo=None)
+    if dt <= now_msk:
         await update.message.reply_text("❌ Время отправки должно быть в будущем.")
         return
 
@@ -1181,13 +1183,14 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 conn_id = cid
                 break
 
-    task_id = f"task_{int(dt.timestamp())}_{random.randint(1000, 9999)}"
+    dt_aware = dt.replace(tzinfo=tz_msk)
+    task_id = f"task_{int(dt_aware.timestamp())}_{random.randint(1000, 9999)}"
     task_data = {
         "id": task_id,
         "chat_id": chat_id,
         "conn_id": conn_id,
         "text": msg_text,
-        "run_at": dt.isoformat(),
+        "run_at": dt_aware.isoformat(),
         "creator_id": user.id
     }
 
@@ -1198,7 +1201,7 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if context.job_queue:
         context.job_queue.run_once(
             send_scheduled_message_callback,
-            when=dt,
+            when=dt_aware,
             data=task_id,
             name=task_id,
             chat_id=chat_id
@@ -2093,13 +2096,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 draft["chat_id"] = chat_id
 
                 user_state[user_id] = "awaiting_schedule_time"
-                now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+                now_msk = datetime.now(tz_msk)
+                now_str = now_msk.strftime("%d.%m.%Y %H:%M")
                 await update.message.reply_text(
                     f"📅 <b>Новое отложенное сообщение (Шаг 2 из 3)</b>\n\n"
                     f"Получатель: <code>{chat_id}</code>\n\n"
                     f"Теперь укажите <b>дату и время отправки</b> в формате: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
                     f"Пример: <code>24.06.2026 15:30</code>\n\n"
-                    f"Текущее время сервера: <b>{now_str}</b>",
+                    f"Текущее время (МСК): <b>{now_str}</b>",
                     parse_mode=ParseMode.HTML,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="settings:scheduler:menu")]])
                 )
@@ -2117,14 +2121,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     )
                     return
 
-                now = datetime.now()
-                if dt <= now:
+                now_msk = datetime.now(tz_msk).replace(tzinfo=None)
+                if dt <= now_msk:
                     user_state[user_id] = state
                     await update.message.reply_text("❌ Время отправки должно быть в будущем. Попробуйте еще раз:")
                     return
 
                 draft = user_schedule_drafts.setdefault(user_id, {})
-                draft["run_at"] = dt.isoformat()
+                dt_aware = dt.replace(tzinfo=tz_msk)
+                draft["run_at"] = dt_aware.isoformat()
 
                 user_state[user_id] = "awaiting_schedule_text"
                 await update.message.reply_text(
@@ -2434,7 +2439,7 @@ async def post_init(app) -> None:
     # Восстановление отложенных сообщений из базы данных
     if app.job_queue:
         tasks = _load_scheduled_tasks()
-        now = datetime.now()
+        now = datetime.now(tz_msk)
         restored_count = 0
         for task in tasks:
             try:
