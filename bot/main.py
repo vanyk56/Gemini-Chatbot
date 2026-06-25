@@ -1828,17 +1828,12 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             logger.warning("Не удалось получить business подключение %s: %s", conn_id, e)
             return
 
-    owner_settings = get_settings(owner_id)
-    if not owner_settings.get("auto_reply", True):
-        return
-
-    # Проверяем, не отключен ли автоответ для этого чата
-    disabled_chats = owner_settings.setdefault("disabled_chats", [])
-    
-    # Если сам владелец пишет команду /automate в бизнес-чате
+    # Если сам владелец пишет в бизнес-чате (команды или обычные сообщения)
     if msg.from_user and msg.from_user.id == owner_id:
         text_stripped = msg.text.strip()
         if text_stripped.startswith("/automate"):
+            owner_settings = get_settings(owner_id)
+            disabled_chats = owner_settings.setdefault("disabled_chats", [])
             if msg.chat.id in disabled_chats:
                 disabled_chats.remove(msg.chat.id)
                 _save_settings()
@@ -1867,6 +1862,13 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                 )
             await process_schedule_command(msg.from_user, msg.chat.id, conn_id, msg.text, reply_fn, context)
         return
+
+    owner_settings = get_settings(owner_id)
+    if not owner_settings.get("auto_reply", True):
+        return
+
+    # Проверяем, не отключен ли автоответ для этого чата
+    disabled_chats = owner_settings.setdefault("disabled_chats", [])
 
     # Если автоответ в этом чате выключен владельцем
     if msg.chat.id in disabled_chats:
