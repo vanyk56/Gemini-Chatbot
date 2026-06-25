@@ -1139,49 +1139,34 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------------------------------------------------------------------------
 # Отложенные сообщения по расписанию: /schedule
 # ---------------------------------------------------------------------------
-async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
+async def process_schedule_command(user, chat_id, conn_id, command_text: str, reply_fn, context) -> None:
     if not is_premium_user(user):
-        await update.message.reply_text("❌ Планирование сообщений доступно только по Premium подписке!")
+        await reply_fn("❌ Планирование сообщений доступно только по Premium подписке!")
         return
 
-    args = context.args
-    if len(args) < 3:
-        await update.message.reply_text(
+    parts = command_text.strip().split(maxsplit=3)
+    if len(parts) < 4:
+        await reply_fn(
             "✏️ Использование: <code>/schedule [ДД.ММ.ГГГГ] [ЧЧ:ММ] [Текст сообщения]</code>\n"
             "Пример: <code>/schedule 24.06.2026 10:00 Привет, это запланированное сообщение!</code>",
             parse_mode=ParseMode.HTML
         )
         return
 
-    date_str = args[0]
-    time_str = args[1]
-    msg_text = " ".join(args[2:])
+    date_str = parts[1]
+    time_str = parts[2]
+    msg_text = parts[3]
 
     try:
         dt = datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
     except ValueError:
-        await update.message.reply_text("❌ Неверный формат даты/времени. Используйте формат: ДД.ММ.ГГГГ ЧЧ:ММ.")
+        await reply_fn("❌ Неверный формат даты/времени. Используйте формат: ДД.ММ.ГГГГ ЧЧ:ММ.")
         return
 
     now_msk = datetime.now(tz_msk).replace(tzinfo=None)
     if dt <= now_msk:
-        await update.message.reply_text("❌ Время отправки должно быть в будущем.")
+        await reply_fn("❌ Время отправки должно быть в будущем.")
         return
-
-    chat_id = update.effective_chat.id
-    conn_id = None
-
-    if update.business_message:
-        conn_id = update.business_message.business_connection_id
-    elif update.message and update.message.business_connection_id:
-        conn_id = update.message.business_connection_id
-
-    if not conn_id:
-        for cid, uid in business_connections.items():
-            if uid == user.id:
-                conn_id = cid
-                break
 
     dt_aware = dt.replace(tzinfo=tz_msk)
     task_id = f"task_{int(dt_aware.timestamp())}_{random.randint(1000, 9999)}"
@@ -1207,7 +1192,28 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             chat_id=chat_id
         )
 
-    await update.message.reply_text(f"📅 Сообщение успешно запланировано на {date_str} {time_str}!")
+    await reply_fn(f"📅 Сообщение успешно запланировано на {date_str} {time_str}!")
+
+async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    conn_id = None
+
+    if update.business_message:
+        conn_id = update.business_message.business_connection_id
+    elif update.message and update.message.business_connection_id:
+        conn_id = update.message.business_connection_id
+
+    if not conn_id:
+        for cid, uid in business_connections.items():
+            if uid == user.id:
+                conn_id = cid
+                break
+
+    async def reply_fn(text, parse_mode=None):
+        await update.message.reply_text(text, parse_mode=parse_mode)
+
+    await process_schedule_command(user, chat_id, conn_id, update.message.text, reply_fn, context)
 
 # ---------------------------------------------------------------------------
 # Административные команды владельца (@ohakol)
@@ -1831,7 +1837,8 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
     
     # Если сам владелец пишет команду /automate в бизнес-чате
     if msg.from_user and msg.from_user.id == owner_id:
-        if msg.text.strip().startswith("/automate"):
+        text_stripped = msg.text.strip()
+        if text_stripped.startswith("/automate"):
             if msg.chat.id in disabled_chats:
                 disabled_chats.remove(msg.chat.id)
                 _save_settings()
@@ -1850,6 +1857,15 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                     parse_mode=ParseMode.HTML,
                     business_connection_id=conn_id
                 )
+        elif text_stripped.startswith("/schedule"):
+            async def reply_fn(text, parse_mode=None):
+                await context.bot.send_message(
+                    chat_id=msg.chat.id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    business_connection_id=conn_id
+                )
+            await process_schedule_command(msg.from_user, msg.chat.id, conn_id, msg.text, reply_fn, context)
         return
 
     # Если автоответ в этом чате выключен владельцем
