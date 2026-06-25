@@ -1,2 +1,10 @@
-# Force Nixpacks to build as a Python project and ignore Node.js/pnpm files
 providers = ["python"]
+
+[phases.setup]
+nixPkgs = ["uv", "python311"]
+
+[phases.install]
+cmds = ["uv sync --frozen"]
+
+[phases.build]
+cmds = ["echo 'Node build skipped'"]
