@@ -1854,12 +1854,32 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                 )
         elif text_stripped.startswith("/schedule"):
             async def reply_fn(text, parse_mode=None):
-                await context.bot.send_message(
+                chat_title = msg.chat.title or msg.chat.username or msg.chat.first_name or f"ID: {msg.chat.id}"
+                custom_text = text.replace("Сообщение успешно запланировано", f"Сообщение для чата <b>{chat_title}</b> успешно запланировано")
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_id,
+                        text=custom_text,
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    logger.error("Не удалось отправить подтверждение в ЛС владельцу: %s", e)
+                    await context.bot.send_message(
+                        chat_id=msg.chat.id,
+                        text=text,
+                        parse_mode=parse_mode,
+                        business_connection_id=conn_id
+                    )
+            
+            # Попробуем удалить исходное сообщение-команду владельца, чтобы собеседник его не видел
+            try:
+                await context.bot.delete_message(
                     chat_id=msg.chat.id,
-                    text=text,
-                    parse_mode=parse_mode,
-                    business_connection_id=conn_id
+                    message_id=msg.message_id
                 )
+            except Exception as e:
+                logger.debug("Не удалось удалить сообщение-команду /schedule: %s", e)
+
             await process_schedule_command(msg.from_user, msg.chat.id, conn_id, msg.text, reply_fn, context)
         return
 
