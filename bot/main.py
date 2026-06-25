@@ -2068,10 +2068,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             if state == "awaiting_schedule_chat":
                 chat_id = None
-                if update.message.forward_from_chat:
-                    chat_id = update.message.forward_from_chat.id
-                elif update.message.forward_from:
-                    chat_id = update.message.forward_from.id
+                if getattr(update.message, "forward_origin", None):
+                    origin = update.message.forward_origin
+                    from telegram import MessageOriginUser, MessageOriginChat, MessageOriginChannel
+                    if isinstance(origin, MessageOriginUser):
+                        chat_id = origin.sender_user.id
+                    elif isinstance(origin, MessageOriginChat):
+                        chat_id = origin.sender_chat.id
+                    elif isinstance(origin, MessageOriginChannel):
+                        chat_id = origin.chat.id
                 else:
                     text_input = user_text.strip()
                     if text_input.startswith("@"):
