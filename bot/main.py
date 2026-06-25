@@ -2062,119 +2062,128 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Проверяем состояние ожидания ввода ( think / image / scheduler )
     state = user_state.pop(user_id, None)
-    if state == "awaiting_schedule_chat":
-        chat_id = None
-        if update.message.forward_from_chat:
-            chat_id = update.message.forward_from_chat.id
-        elif update.message.forward_from:
-            chat_id = update.message.forward_from.id
-        else:
-            text_input = user_text.strip()
-            if text_input.startswith("@"):
-                chat_id = text_input
-            else:
+    logger.info("Получено сообщение от %d: '%s' (состояние: %s)", user_id, user_text, state)
+
+    if state in ("awaiting_schedule_chat", "awaiting_schedule_time", "awaiting_schedule_text"):
+        try:
+            if state == "awaiting_schedule_chat":
+                chat_id = None
+                if update.message.forward_from_chat:
+                    chat_id = update.message.forward_from_chat.id
+                elif update.message.forward_from:
+                    chat_id = update.message.forward_from.id
+                else:
+                    text_input = user_text.strip()
+                    if text_input.startswith("@"):
+                        chat_id = text_input
+                    else:
+                        try:
+                            chat_id = int(text_input)
+                        except ValueError:
+                            user_state[user_id] = state
+                            await update.message.reply_text("❌ Неверный формат получателя. Пожалуйста, отправьте числовой ID или юзернейм.")
+                            return
+
+                draft = user_schedule_drafts.setdefault(user_id, {})
+                draft["chat_id"] = chat_id
+
+                user_state[user_id] = "awaiting_schedule_time"
+                now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+                await update.message.reply_text(
+                    f"📅 <b>Новое отложенное сообщение (Шаг 2 из 3)</b>\n\n"
+                    f"Получатель: <code>{chat_id}</code>\n\n"
+                    f"Теперь укажите <b>дату и время отправки</b> в формате: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
+                    f"Пример: <code>24.06.2026 15:30</code>\n\n"
+                    f"Текущее время сервера: <b>{now_str}</b>",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="settings:scheduler:menu")]])
+                )
+                return
+
+            elif state == "awaiting_schedule_time":
+                time_text = user_text.strip()
                 try:
-                    chat_id = int(text_input)
+                    dt = datetime.strptime(time_text, "%d.%m.%Y %H:%M")
                 except ValueError:
                     user_state[user_id] = state
-                    await update.message.reply_text("❌ Неверный формат получателя. Пожалуйста, отправьте числовой ID или юзернейм.")
+                    await update.message.reply_text(
+                        "❌ Неверный формат времени. Пожалуйста, введите дату и время в формате <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> (например, 24.06.2026 15:30).",
+                        parse_mode=ParseMode.HTML
+                    )
                     return
 
-        draft = user_schedule_drafts.setdefault(user_id, {})
-        draft["chat_id"] = chat_id
+                now = datetime.now()
+                if dt <= now:
+                    user_state[user_id] = state
+                    await update.message.reply_text("❌ Время отправки должно быть в будущем. Попробуйте еще раз:")
+                    return
 
-        user_state[user_id] = "awaiting_schedule_time"
-        now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-        await update.message.reply_text(
-            f"📅 <b>Новое отложенное сообщение (Шаг 2 из 3)</b>\n\n"
-            f"Получатель: <code>{chat_id}</code>\n\n"
-            f"Теперь укажите <b>дату и время отправки</b> в формате: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
-            f"Пример: <code>24.06.2026 15:30</code>\n\n"
-            f"Текущее время сервера: <b>{now_str}</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="settings:scheduler:menu")]])
-        )
-        return
+                draft = user_schedule_drafts.setdefault(user_id, {})
+                draft["run_at"] = dt.isoformat()
 
-    elif state == "awaiting_schedule_time":
-        time_text = user_text.strip()
-        try:
-            dt = datetime.strptime(time_text, "%d.%m.%Y %H:%M")
-        except ValueError:
+                user_state[user_id] = "awaiting_schedule_text"
+                await update.message.reply_text(
+                    f"📅 <b>Новое отложенное сообщение (Шаг 3 из 3)</b>\n\n"
+                    f"Получатель: <code>{draft['chat_id']}</code>\n"
+                    f"Время отправки: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
+                    f"Теперь напишите <b>текст сообщения</b>, которое нужно отправить:",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="settings:scheduler:menu")]])
+                )
+                return
+
+            elif state == "awaiting_schedule_text":
+                msg_text = user_text
+                draft = user_schedule_drafts.pop(user_id, {})
+
+                chat_id = draft.get("chat_id")
+                run_at_str = draft.get("run_at")
+                dt = datetime.fromisoformat(run_at_str)
+
+                conn_id = None
+                for cid, uid in business_connections.items():
+                    if uid == user_id:
+                        conn_id = cid
+                        break
+
+                task_id = f"task_{int(dt.timestamp())}_{random.randint(1000, 9999)}"
+                task_data = {
+                    "id": task_id,
+                    "chat_id": chat_id,
+                    "conn_id": conn_id,
+                    "text": msg_text,
+                    "run_at": run_at_str,
+                    "creator_id": user_id
+                }
+
+                tasks = _load_scheduled_tasks()
+                tasks.append(task_data)
+                _save_scheduled_tasks(tasks)
+
+                if context.job_queue:
+                    context.job_queue.run_once(
+                        send_scheduled_message_callback,
+                        when=dt,
+                        data=task_id,
+                        name=task_id,
+                        chat_id=chat_id
+                    )
+
+                await update.message.reply_text(
+                    f"✅ <b>Сообщение успешно запланировано!</b>\n\n"
+                    f"Получатель: <code>{chat_id}</code>\n"
+                    f"Время: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
+                    f"Текст: {msg_text}",
+                    parse_mode=ParseMode.HTML
+                )
+
+                await send_new_menu(update.effective_chat.id, context, user_id)
+                return
+        except Exception as err:
+            logger.exception("Исключение в мастере планирования отложенного сообщения")
             user_state[user_id] = state
-            await update.message.reply_text(
-                "❌ Неверный формат времени. Пожалуйста, введите дату и время в формате <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> (например, 24.06.2026 15:30).",
-                parse_mode=ParseMode.HTML
-            )
+            await update.message.reply_text(f"⚠️ Произошла ошибка во время настройки: {err}\nСостояние сброшено, попробуйте еще раз.")
             return
-
-        now = datetime.now()
-        if dt <= now:
-            user_state[user_id] = state
-            await update.message.reply_text("❌ Время отправки должно быть в будущем. Попробуйте еще раз:")
-            return
-
-        draft = user_schedule_drafts.setdefault(user_id, {})
-        draft["run_at"] = dt.isoformat()
-
-        user_state[user_id] = "awaiting_schedule_text"
-        await update.message.reply_text(
-            f"📅 <b>Новое отложенное сообщение (Шаг 3 из 3)</b>\n\n"
-            f"Получатель: <code>{draft['chat_id']}</code>\n"
-            f"Время отправки: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
-            f"Теперь напишите <b>текст сообщения</b>, которое нужно отправить:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="settings:scheduler:menu")]])
-        )
-        return
-
-    elif state == "awaiting_schedule_text":
-        msg_text = user_text
-        draft = user_schedule_drafts.pop(user_id, {})
-
-        chat_id = draft.get("chat_id")
-        run_at_str = draft.get("run_at")
-        dt = datetime.fromisoformat(run_at_str)
-
-        conn_id = None
-        for cid, uid in business_connections.items():
-            if uid == user_id:
-                conn_id = cid
-                break
-
-        task_id = f"task_{int(dt.timestamp())}_{random.randint(1000, 9999)}"
-        task_data = {
-            "id": task_id,
-            "chat_id": chat_id,
-            "conn_id": conn_id,
-            "text": msg_text,
-            "run_at": run_at_str,
-            "creator_id": user_id
-        }
-
-        tasks = _load_scheduled_tasks()
-        tasks.append(task_data)
-        _save_scheduled_tasks(tasks)
-
-        if context.job_queue:
-            context.job_queue.run_once(
-                send_scheduled_message_callback,
-                when=dt,
-                data=task_id,
-                name=task_id,
-                chat_id=chat_id
-            )
-
-        await update.message.reply_text(
-            f"✅ <b>Сообщение успешно запланировано!</b>\n\n"
-            f"Получатель: <code>{chat_id}</code>\n"
-            f"Время: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
-            f"Текст: {msg_text}",
-            parse_mode=ParseMode.HTML
-        )
-
-        await send_new_menu(update.effective_chat.id, context, user_id)
-        return
 
     if state == "awaiting_think":
         allowed, reason = check_and_record_premium_request(update.effective_user)
