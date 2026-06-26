@@ -70,7 +70,6 @@ logger = logging.getLogger(__name__)
 # Токены / Клиент
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-REPLIT_DEPLOYMENT_TOKEN = os.environ.get("REPLIT_DEPLOYMENT_TOKEN")
 
 _REPLIT_BASE_URL = os.environ.get("AI_INTEGRATIONS_GEMINI_BASE_URL")
 _REPLIT_API_KEY  = os.environ.get("AI_INTEGRATIONS_GEMINI_API_KEY")
@@ -775,19 +774,15 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------------------------------------------------------------------------
 # /settings
 # ---------------------------------------------------------------------------
-def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str, agent_token: str = None) -> str:
-    agent_status = "подключен ✅" if agent_token else "не настроен ❌"
-    token_part = f"\n🔑 Токен: <code>{agent_token}</code>" if agent_token else ""
+def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str) -> str:
     return (
         "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
         f"👑 Подписка: <b>{prem_status}</b>\n"
         f"🗂 Режим чата: <b>{mode_label}</b>\n"
         f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
         f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
-        f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n"
-        f"🤖 SYNAPSE AGENT: <b>{agent_status}</b>{token_part}\n\n"
-        "Получить токен связи: /connect\n"
-        "Отправить задачу агенту: <code>/agent [задача]</code>\n\n"
+        f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
+        "🤖 <b>SYNAPSE AGENT</b>: Вы можете запустить автономного агента, нажав на кнопку <b>Agent</b> рядом с полем ввода сообщения в этом чате.\n\n"
         "Используйте /persona для настройки личности."
     )
 
@@ -799,7 +794,6 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     auto = settings.get("auto_reply", True)
     max_h = settings.get("max_history", 20)
     persona = settings.get("persona", "")
-    agent_token = settings.get("agent_token")
 
     mode_label = {"default": "💬 Gemini (OmniRoute)", "claude": "🎭 Claude (OpenRouter)"}.get(mode, mode)
     auto_label = "✅ Вкл" if auto else "❌ Выкл"
@@ -808,7 +802,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     is_prem = is_premium_user(user)
     prem_status = "Активна 👑" if is_prem else "Не активна ❌"
 
-    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, agent_token)
+    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -1226,77 +1220,7 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await process_schedule_command(user, chat_id, conn_id, update.message.text, reply_fn, context)
 
-async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    settings = get_settings(user_id)
-    token = settings.get("agent_token")
-    if not token:
-        import secrets
-        token = f"synapse_{secrets.token_hex(16)}"
-        settings["agent_token"] = token
-        _save_settings()
-    
-    await update.message.reply_text(
-        f"🔗 <b>Токен связи с SYNAPSE AGENT</b>\n\n"
-        f"Твой токен:\n<code>{token}</code>\n\n"
-        f"Скопируй и вставь его в настройках SYNAPSE AGENT на Replit.",
-        parse_mode=ParseMode.HTML
-    )
 
-async def cmd_agent_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "ℹ️ <b>Настройка SYNAPSE AGENT теперь автоматическая!</b>\n\n"
-        "1. Используйте команду /connect для генерации уникального токена.\n"
-        "2. Вставьте этот токен в настройки в интерфейсе SYNAPSE AGENT.\n"
-        "3. После этого отправляйте задачи командой <code>/agent [задача]</code>.",
-        parse_mode=ParseMode.HTML
-    )
-
-async def cmd_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    settings = get_settings(user_id)
-    token = settings.get("agent_token")
-    
-    if not token:
-        await update.message.reply_text(
-            "⚠️ Вы не создали токен для связи с агентом.\n"
-            "Используйте команду /connect для генерации токена.",
-            parse_mode=ParseMode.HTML
-        )
-        return
-        
-    task_text = " ".join(context.args).strip()
-    if not task_text:
-        await update.message.reply_text(
-            "✏️ Напишите задачу после команды. Пример:\n"
-            "<code>/agent создай папку src и файл index.js</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-        
-    await update.message.reply_text("⏳ <i>Отправляю задачу агенту...</i>", parse_mode=ParseMode.HTML)
-    
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client_http:
-            target_url = "https://agentsynapse.replit.app/api/bot-task"
-            payload = {
-                "token": token,
-                "task": task_text
-            }
-            headers = {}
-            if REPLIT_DEPLOYMENT_TOKEN:
-                headers["Authorization"] = f"Bearer {REPLIT_DEPLOYMENT_TOKEN}"
-            response = await client_http.post(target_url, json=payload, headers=headers)
-            if response.status_code == 200:
-                resp_data = response.json()
-                result_text = resp_data.get("result") or resp_data.get("response") or "Задача успешно выполнена."
-                if len(result_text) > 4000:
-                    result_text = result_text[:4000] + "\n\n<i>[Ответ урезан...]</i>"
-                await update.message.reply_text(f"✅ <b>Ответ агента:</b>\n\n{result_text}", parse_mode=ParseMode.HTML)
-            else:
-                await update.message.reply_text(f"❌ Ошибка агента (HTTP {response.status_code}): {response.text}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Не удалось связаться с агентом: {e}")
 
 # ---------------------------------------------------------------------------
 # Административные команды владельца (@ohakol)
@@ -1651,13 +1575,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
-        agent_token = settings.get("agent_token")
 
         mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, agent_token)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1746,12 +1669,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
-        agent_token = settings.get("agent_token")
         mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, agent_token)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -2615,24 +2537,7 @@ async def handle_http_request(reader, writer):
             writer.close()
             return
 
-        if path_only == "/api/token" and method == "GET":
-            user_ids = query_params.get("user_id")
-            if not user_ids:
-                raise ValueError("Missing user_id")
-            user_id = int(user_ids[0])
-            settings = get_settings(user_id)
-            token = settings.get("agent_token", "")
-            
-            body_resp = json.dumps({"token": token})
-            response = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n" + cors_headers +
-                f"Content-Length: {len(body_resp)}\r\n\r\n" + body_resp
-            )
-            writer.write(response.encode())
-            await writer.drain()
-            writer.close()
-            return
+
             
         if path_only == "/api/settings" and method == "POST":
             data = json.loads(body.decode('utf-8'))
@@ -2797,8 +2702,6 @@ async def post_init(app) -> None:
         BotCommand("history",  "📜 Управление историей"),
         BotCommand("settings", "⚙️ Настройки бота"),
         BotCommand("schedule", "📅 Отложенное сообщение"),
-        BotCommand("connect",  "🔗 Подключение SYNAPSE AGENT"),
-        BotCommand("agent",    "🚀 Отправить задачу агенту"),
         BotCommand("reset",    "🗑️ Очистить историю"),
     ])
     logger.info("Меню команд обновлено.")
@@ -2849,9 +2752,7 @@ def main() -> None:
     app.add_handler(CommandHandler("revoke_premium", cmd_revoke_premium))
     app.add_handler(CommandHandler("list_premium", cmd_list_premium))
     app.add_handler(CommandHandler("schedule", cmd_schedule))
-    app.add_handler(CommandHandler("connect", cmd_connect))
-    app.add_handler(CommandHandler("agent_setup", cmd_agent_setup))
-    app.add_handler(CommandHandler("agent", cmd_agent))
+
 
     # Inline-кнопки
     app.add_handler(CallbackQueryHandler(handle_callback))
