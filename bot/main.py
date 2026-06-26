@@ -70,6 +70,7 @@ logger = logging.getLogger(__name__)
 # Токены / Клиент
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+REPLIT_DEPLOYMENT_TOKEN = os.environ.get("REPLIT_DEPLOYMENT_TOKEN")
 
 _REPLIT_BASE_URL = os.environ.get("AI_INTEGRATIONS_GEMINI_BASE_URL")
 _REPLIT_API_KEY  = os.environ.get("AI_INTEGRATIONS_GEMINI_API_KEY")
@@ -1282,7 +1283,10 @@ async def cmd_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "token": token,
                 "task": task_text
             }
-            response = await client_http.post(target_url, json=payload)
+            headers = {}
+            if REPLIT_DEPLOYMENT_TOKEN:
+                headers["Authorization"] = f"Bearer {REPLIT_DEPLOYMENT_TOKEN}"
+            response = await client_http.post(target_url, json=payload, headers=headers)
             if response.status_code == 200:
                 resp_data = response.json()
                 result_text = resp_data.get("result") or resp_data.get("response") or "Задача успешно выполнена."
