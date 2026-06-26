@@ -773,6 +773,18 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------------------------------------------------------------------------
 # /settings
 # ---------------------------------------------------------------------------
+def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str) -> str:
+    return (
+        "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
+        f"👑 Подписка: <b>{prem_status}</b>\n"
+        f"🗂 Режим чата: <b>{mode_label}</b>\n"
+        f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
+        f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
+        f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
+        "🤖 Панель управления <b>SYNAPSE AGENT</b> доступна по кнопке <b>Agent</b> (находится рядом с полем ввода).\n\n"
+        "Используйте /persona для настройки личности."
+    )
+
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_id = user.id
@@ -789,15 +801,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     is_prem = is_premium_user(user)
     prem_status = "Активна 👑" if is_prem else "Не активна ❌"
 
-    text = (
-        "⚙️ <b>Настройки бота</b>\n\n"
-        f"👑 Подписка: <b>{prem_status}</b>\n"
-        f"🗂 Режим чата: <b>{mode_label}</b>\n"
-        f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
-        f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
-        f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
-        "Используйте /persona для настройки личности."
-    )
+    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -1573,15 +1577,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = (
-            "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
-            f"👑 Подписка: <b>{prem_status}</b>\n"
-            f"🗂 Режим чата: <b>{mode_label}</b>\n"
-            f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
-            f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
-            f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
-            "Используйте /persona для настройки личности."
-        )
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1674,15 +1670,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = (
-            "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
-            f"👑 Подписка: <b>{prem_status}</b>\n"
-            f"🗂 Режим чата: <b>{mode_label}</b>\n"
-            f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
-            f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
-            f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
-            "Используйте /persona для настройки личности."
-        )
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1737,15 +1725,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = (
-            "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
-            f"👑 Подписка: <b>{prem_status}</b>\n"
-            f"🗂 Режим чата: <b>{mode_label}</b>\n"
-            f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
-            f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
-            f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
-            "Используйте /persona для настройки личности."
-        )
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
 
         keyboard = InlineKeyboardMarkup([
             [
