@@ -795,7 +795,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     max_h = settings.get("max_history", 20)
     persona = settings.get("persona", "")
 
-    mode_label = {"default": "💬 Gemini (OmniRoute)", "claude": "🎭 Claude (OpenRouter)"}.get(mode, mode)
+    mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
     auto_label = "✅ Вкл" if auto else "❌ Выкл"
     persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
@@ -1576,7 +1576,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
 
-        mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
+        mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
@@ -1669,7 +1669,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
-        mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
+        mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
