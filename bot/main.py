@@ -420,6 +420,7 @@ BUSINESS_CONN_FILE    = Path("bot/business_connections.json")
 PREMIUM_USERS_FILE    = Path("bot/premium_users.json")
 SCHEDULED_TASKS_FILE  = Path("bot/scheduled_tasks.json")
 
+global_app = None
 conversation_history: dict[str, list]          = {}
 conversation_timestamps: dict[str, list[str]]  = {}
 user_mode: dict[int, str]                       = {}
@@ -773,15 +774,19 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------------------------------------------------------------------------
 # /settings
 # ---------------------------------------------------------------------------
-def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str) -> str:
+def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str, agent_token: str = None) -> str:
+    agent_status = "подключен ✅" if agent_token else "не настроен ❌"
+    token_part = f"\n🔑 Токен: <code>{agent_token}</code>" if agent_token else ""
     return (
         "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
         f"👑 Подписка: <b>{prem_status}</b>\n"
         f"🗂 Режим чата: <b>{mode_label}</b>\n"
         f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
         f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
-        f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
-        "🤖 Панель управления <b>SYNAPSE AGENT</b> доступна по кнопке <b>Agent</b> (находится рядом с полем ввода).\n\n"
+        f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n"
+        f"🤖 SYNAPSE AGENT: <b>{agent_status}</b>{token_part}\n\n"
+        "Получить токен связи: /connect\n"
+        "Отправить задачу агенту: <code>/agent [задача]</code>\n\n"
         "Используйте /persona для настройки личности."
     )
 
@@ -793,6 +798,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     auto = settings.get("auto_reply", True)
     max_h = settings.get("max_history", 20)
     persona = settings.get("persona", "")
+    agent_token = settings.get("agent_token")
 
     mode_label = {"default": "💬 Gemini (OmniRoute)", "claude": "🎭 Claude (OpenRouter)"}.get(mode, mode)
     auto_label = "✅ Вкл" if auto else "❌ Выкл"
@@ -801,7 +807,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     is_prem = is_premium_user(user)
     prem_status = "Активна 👑" if is_prem else "Не активна ❌"
 
-    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
+    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, agent_token)
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -1219,6 +1225,75 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await process_schedule_command(user, chat_id, conn_id, update.message.text, reply_fn, context)
 
+async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    settings = get_settings(user_id)
+    token = settings.get("agent_token")
+    if not token:
+        import secrets
+        token = f"synapse_{secrets.token_hex(16)}"
+        settings["agent_token"] = token
+        _save_settings()
+    
+    await update.message.reply_text(
+        f"🔗 <b>Токен связи с SYNAPSE AGENT</b>\n\n"
+        f"Твой токен:\n<code>{token}</code>\n\n"
+        f"Скопируй и вставь его в настройках SYNAPSE AGENT на Replit.",
+        parse_mode=ParseMode.HTML
+    )
+
+async def cmd_agent_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "ℹ️ <b>Настройка SYNAPSE AGENT теперь автоматическая!</b>\n\n"
+        "1. Используйте команду /connect для генерации уникального токена.\n"
+        "2. Вставьте этот токен в настройки в интерфейсе SYNAPSE AGENT.\n"
+        "3. После этого отправляйте задачи командой <code>/agent [задача]</code>.",
+        parse_mode=ParseMode.HTML
+    )
+
+async def cmd_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    settings = get_settings(user_id)
+    token = settings.get("agent_token")
+    
+    if not token:
+        await update.message.reply_text(
+            "⚠️ Вы не создали токен для связи с агентом.\n"
+            "Используйте команду /connect для генерации токена.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+        
+    task_text = " ".join(context.args).strip()
+    if not task_text:
+        await update.message.reply_text(
+            "✏️ Напишите задачу после команды. Пример:\n"
+            "<code>/agent создай папку src и файл index.js</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+        
+    await update.message.reply_text("⏳ <i>Отправляю задачу агенту...</i>", parse_mode=ParseMode.HTML)
+    
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client_http:
+            target_url = "https://agentsynapse.replit.app/api/bot-task"
+            payload = {
+                "token": token,
+                "task": task_text
+            }
+            response = await client_http.post(target_url, json=payload)
+            if response.status_code == 200:
+                resp_data = response.json()
+                result_text = resp_data.get("result") or resp_data.get("response") or "Задача успешно выполнена."
+                if len(result_text) > 4000:
+                    result_text = result_text[:4000] + "\n\n<i>[Ответ урезан...]</i>"
+                await update.message.reply_text(f"✅ <b>Ответ агента:</b>\n\n{result_text}", parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(f"❌ Ошибка агента (HTTP {response.status_code}): {response.text}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Не удалось связаться с агентом: {e}")
+
 # ---------------------------------------------------------------------------
 # Административные команды владельца (@ohakol)
 # ---------------------------------------------------------------------------
@@ -1572,12 +1647,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
+        agent_token = settings.get("agent_token")
 
         mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, agent_token)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1666,11 +1742,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
+        agent_token = settings.get("agent_token")
         mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, agent_token)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1721,11 +1798,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
+        agent_token = settings.get("agent_token")
         mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, agent_token)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -2448,8 +2526,263 @@ async def send_scheduled_message_callback(context: ContextTypes.DEFAULT_TYPE) ->
     remaining_tasks = [t for t in tasks if t["id"] != task_id]
     _save_scheduled_tasks(remaining_tasks)
 
+class SimpleUser:
+    def __init__(self, user_id, username=None):
+        self.id = user_id
+        self.username = username
+
+async def handle_http_request(reader, writer):
+    try:
+        request_line = await reader.readline()
+        if not request_line:
+            writer.close()
+            return
+        
+        parts = request_line.decode().split()
+        if len(parts) < 2:
+            writer.close()
+            return
+            
+        method, path = parts[0], parts[1]
+        
+        headers = {}
+        while True:
+            line = await reader.readline()
+            if line == b'\r\n' or line == b'\n' or not line:
+                break
+            header_parts = line.decode().split(':', 1)
+            if len(header_parts) == 2:
+                headers[header_parts[0].strip().lower()] = header_parts[1].strip()
+                
+        body = b""
+        if 'content-length' in headers:
+            content_length = int(headers['content-length'])
+            body = await reader.readexactly(content_length)
+            
+        url_parsed = urllib.parse.urlparse(path)
+        path_only = url_parsed.path
+        query_params = urllib.parse.parse_qs(url_parsed.query)
+
+        cors_headers = (
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE\r\n"
+            "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        )
+        
+        if method == "OPTIONS":
+            response = "HTTP/1.1 204 No Content\r\n" + cors_headers + "\r\n"
+            writer.write(response.encode())
+            await writer.drain()
+            writer.close()
+            return
+            
+        if path_only == "/":
+            body_resp = json.dumps({"status": "ok", "bot": "SYNAPSE"})
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n" + cors_headers + 
+                f"Content-Length: {len(body_resp)}\r\n\r\n" + body_resp
+            )
+            writer.write(response.encode())
+            await writer.drain()
+            writer.close()
+            return
+            
+        if path_only == "/api/settings" and method == "GET":
+            user_ids = query_params.get("user_id")
+            if not user_ids:
+                raise ValueError("Missing user_id")
+            user_id = int(user_ids[0])
+            user_settings_data = get_settings(user_id)
+            mode = user_mode.get(user_id, "default")
+            
+            body_resp = json.dumps({
+                "settings": user_settings_data,
+                "mode": mode,
+                "is_premium": is_premium_user(SimpleUser(user_id))
+            }, ensure_ascii=False)
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json; charset=utf-8\r\n" + cors_headers +
+                f"Content-Length: {len(body_resp.encode('utf-8'))}\r\n\r\n" + body_resp
+            )
+            writer.write(response.encode('utf-8'))
+            await writer.drain()
+            writer.close()
+            return
+
+        if path_only == "/api/token" and method == "GET":
+            user_ids = query_params.get("user_id")
+            if not user_ids:
+                raise ValueError("Missing user_id")
+            user_id = int(user_ids[0])
+            settings = get_settings(user_id)
+            token = settings.get("agent_token", "")
+            
+            body_resp = json.dumps({"token": token})
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n" + cors_headers +
+                f"Content-Length: {len(body_resp)}\r\n\r\n" + body_resp
+            )
+            writer.write(response.encode())
+            await writer.drain()
+            writer.close()
+            return
+            
+        if path_only == "/api/settings" and method == "POST":
+            data = json.loads(body.decode('utf-8'))
+            user_id = int(data["user_id"])
+            
+            settings = get_settings(user_id)
+            if "auto_reply" in data:
+                settings["auto_reply"] = bool(data["auto_reply"])
+            if "max_history" in data:
+                settings["max_history"] = int(data["max_history"])
+            if "persona" in data:
+                settings["persona"] = str(data["persona"])
+            _save_settings()
+            
+            if "mode" in data:
+                set_user_mode(user_id, str(data["mode"]))
+                
+            body_resp = json.dumps({"status": "success"})
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n" + cors_headers +
+                f"Content-Length: {len(body_resp)}\r\n\r\n" + body_resp
+            )
+            writer.write(response.encode())
+            await writer.drain()
+            writer.close()
+            return
+
+        if path_only == "/api/tasks" and method == "GET":
+            user_ids = query_params.get("user_id")
+            if not user_ids:
+                raise ValueError("Missing user_id")
+            user_id = int(user_ids[0])
+            
+            tasks = _load_scheduled_tasks()
+            user_tasks = [t for t in tasks if t.get("creator_id") == user_id]
+            
+            body_resp = json.dumps({"tasks": user_tasks}, ensure_ascii=False)
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json; charset=utf-8\r\n" + cors_headers +
+                f"Content-Length: {len(body_resp.encode('utf-8'))}\r\n\r\n" + body_resp
+            )
+            writer.write(response.encode('utf-8'))
+            await writer.drain()
+            writer.close()
+            return
+
+        if path_only == "/api/tasks" and method == "POST":
+            data = json.loads(body.decode('utf-8'))
+            user_id = int(data["user_id"])
+            chat_id = data["chat_id"]
+            msg_text = data["text"]
+            run_at_str = data["run_at"]
+            
+            dt = datetime.fromisoformat(run_at_str)
+            
+            conn_id = None
+            for cid, uid in business_connections.items():
+                if uid == user_id:
+                    conn_id = cid
+                    break
+                    
+            task_id = f"task_{int(dt.timestamp())}_{random.randint(1000, 9999)}"
+            task_data = {
+                "id": task_id,
+                "chat_id": chat_id,
+                "conn_id": conn_id,
+                "text": msg_text,
+                "run_at": run_at_str,
+                "creator_id": user_id
+            }
+            
+            tasks = _load_scheduled_tasks()
+            tasks.append(task_data)
+            _save_scheduled_tasks(tasks)
+            
+            if global_app and global_app.job_queue:
+                global_app.job_queue.run_once(
+                    send_scheduled_message_callback,
+                    when=dt,
+                    data=task_id,
+                    name=task_id,
+                    chat_id=chat_id
+                )
+                
+            body_resp = json.dumps({"status": "success", "task_id": task_id})
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n" + cors_headers +
+                f"Content-Length: {len(body_resp)}\r\n\r\n" + body_resp
+            )
+            writer.write(response.encode())
+            await writer.drain()
+            writer.close()
+            return
+
+        if path_only == "/api/tasks/delete" and method == "POST":
+            data = json.loads(body.decode('utf-8'))
+            task_id = data["task_id"]
+            
+            tasks = _load_scheduled_tasks()
+            tasks = [t for t in tasks if t["id"] != task_id]
+            _save_scheduled_tasks(tasks)
+            
+            if global_app and global_app.job_queue:
+                jobs = global_app.job_queue.get_jobs_by_name(task_id)
+                for j in jobs:
+                    j.schedule_removal()
+                    
+            body_resp = json.dumps({"status": "success"})
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n" + cors_headers +
+                f"Content-Length: {len(body_resp)}\r\n\r\n" + body_resp
+            )
+            writer.write(response.encode())
+            await writer.drain()
+            writer.close()
+            return
+            
+        response = "HTTP/1.1 404 Not Found\r\n" + cors_headers + "Content-Length: 0\r\n\r\n"
+        writer.write(response.encode())
+        await writer.drain()
+        writer.close()
+
+    except Exception as e:
+        logger.error("HTTP handler error: %s", e)
+        try:
+            body_resp = json.dumps({"error": str(e)})
+            response = (
+                "HTTP/1.1 400 Bad Request\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body_resp)}\r\n\r\n" + body_resp
+            )
+            writer.write(response.encode())
+            await writer.drain()
+            writer.close()
+        except Exception:
+            pass
+
+async def start_http_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = await asyncio.start_server(handle_http_request, '0.0.0.0', port)
+    logger.info("HTTP Server started on port %d", port)
+    async with server:
+        await server.serve_forever()
+
 async def post_init(app) -> None:
     """Устанавливает меню команд бота после запуска."""
+    global global_app
+    global_app = app
+    asyncio.create_task(start_http_server())
+
     from telegram import BotCommand
     await app.bot.set_my_commands([
         BotCommand("start",    "👋 Главное меню бота"),
@@ -2460,6 +2793,8 @@ async def post_init(app) -> None:
         BotCommand("history",  "📜 Управление историей"),
         BotCommand("settings", "⚙️ Настройки бота"),
         BotCommand("schedule", "📅 Отложенное сообщение"),
+        BotCommand("connect",  "🔗 Подключение SYNAPSE AGENT"),
+        BotCommand("agent",    "🚀 Отправить задачу агенту"),
         BotCommand("reset",    "🗑️ Очистить историю"),
     ])
     logger.info("Меню команд обновлено.")
@@ -2510,6 +2845,9 @@ def main() -> None:
     app.add_handler(CommandHandler("revoke_premium", cmd_revoke_premium))
     app.add_handler(CommandHandler("list_premium", cmd_list_premium))
     app.add_handler(CommandHandler("schedule", cmd_schedule))
+    app.add_handler(CommandHandler("connect", cmd_connect))
+    app.add_handler(CommandHandler("agent_setup", cmd_agent_setup))
+    app.add_handler(CommandHandler("agent", cmd_agent))
 
     # Inline-кнопки
     app.add_handler(CallbackQueryHandler(handle_callback))
