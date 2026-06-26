@@ -1776,22 +1776,31 @@ async def handle_business_connection(update: Update, context: ContextTypes.DEFAU
     conn = update.business_connection
     user_id = conn.user.id
 
+    was_connected = conn.id in business_connections
+
     if conn.is_enabled:
         business_connections[conn.id] = user_id
         _save_business_connections()
         logger.info("Business подключение: user=%d conn_id=%s", user_id, conn.id)
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "✅ <b>Автоматизация чатов подключена!</b>\n\n"
-                    "Теперь я буду отвечать на сообщения в твоих чатах от твоего имени.\n\n"
-                    "⚙️ Управляй настройками через /settings\n"
-                    "🔄 Авто-ответ можно отключить там же.\n"
-                    "🚫 Для отключения автоответа в конкретном чате, напиши <code>/automate</code> прямо в нём."
-                ),
-                parse_mode=ParseMode.HTML,
-            )
+            if not was_connected:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "✅ <b>Автоматизация чатов подключена!</b>\n\n"
+                        "Теперь я буду отвечать на сообщения в твоих чатах от твоего имени.\n\n"
+                        "⚙️ Управляй настройками через /settings\n"
+                        "🔄 Авто-ответ можно отключить там же.\n"
+                        "🚫 Для отключения автоответа в конкретном чате, напиши <code>/automate</code> прямо в нём."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="⚙️ <b>Настройки автоматизации чатов обновлены в Telegram!</b>",
+                    parse_mode=ParseMode.HTML,
+                )
         except Exception as e:
             logger.warning("Не удалось отправить уведомление: %s", e)
     else:
@@ -1801,10 +1810,11 @@ async def handle_business_connection(update: Update, context: ContextTypes.DEFAU
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text="❌ Автоматизация чатов отключена.",
+                text="❌ <b>Автоматизация чатов отключена.</b>",
+                parse_mode=ParseMode.HTML,
             )
         except Exception as e:
-            logger.warning("Не удалось отправить уведомление: %s", e)
+            logger.warning("Не удалось отправить уведомление об отключении: %s", e)
 
 # ---------------------------------------------------------------------------
 # Business Bot: входящие сообщения через бизнес-аккаунт
