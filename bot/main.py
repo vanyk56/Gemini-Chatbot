@@ -358,6 +358,7 @@ async def native_stream_reply(
     stream_iter,
     *,
     reply_to_message_id: int | None = None,
+    reply_markup=None,
 ) -> str:
     chat_id  = update.effective_chat.id
     draft_id = _next_draft_id()
@@ -402,14 +403,19 @@ async def native_stream_reply(
 
     if accumulated:
         final_html = md_to_html(accumulated)
-        for part in split_message(final_html):
+        parts = split_message(final_html)
+        for i, part in enumerate(parts):
             kwargs: dict = {"parse_mode": ParseMode.HTML}
             if reply_to_message_id:
                 kwargs["reply_to_message_id"] = reply_to_message_id
+            if reply_markup and i == len(parts) - 1:
+                kwargs["reply_markup"] = reply_markup
             try:
                 await update.message.reply_text(part, **kwargs)
             except Exception:
-                await update.message.reply_text(part)
+                if "parse_mode" in kwargs:
+                    kwargs.pop("parse_mode")
+                await update.message.reply_text(part, **kwargs)
 
     return accumulated
 
@@ -436,6 +442,28 @@ VIDEO_LIMITS_FILE = Path("bot/video_limits.json")
 VIDEO_MODELS_FILE = Path("bot/video_models.json")
 user_video_limits: dict[int, int] = {}
 user_video_model: dict[int, str] = {}
+
+POST_DRAFTS_FILE = Path("bot/post_drafts.json")
+post_drafts: dict[str, str] = {}
+
+def _load_post_drafts() -> None:
+    global post_drafts
+    if POST_DRAFTS_FILE.exists():
+        try:
+            data = json.loads(POST_DRAFTS_FILE.read_text(encoding="utf-8"))
+            post_drafts = data
+            logger.info("Загружено черновиков постов: %d", len(post_drafts))
+        except Exception as e:
+            logger.warning("Не удалось загрузить черновики постов: %s", e)
+
+def _save_post_drafts() -> None:
+    try:
+        POST_DRAFTS_FILE.write_text(
+            json.dumps(post_drafts, ensure_ascii=False),
+            encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning("Не удалось сохранить черновики постов: %s", e)
 
 def _load_video_data() -> None:
     global user_video_limits, user_video_model
@@ -617,6 +645,7 @@ def _load_state() -> None:
     global user_mode, user_settings, business_connections
     _load_premium_users()
     _load_video_data()
+    _load_post_drafts()
     if USER_MODE_FILE.exists():
         try:
             data = json.loads(USER_MODE_FILE.read_text(encoding="utf-8"))
@@ -930,13 +959,14 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------------------------------------------------------------------------
 # /settings
 # ---------------------------------------------------------------------------
-def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str) -> str:
+def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str, channel_label: str) -> str:
     return (
         "⚙️ <b>НАСТРОЙКИ БОТА SYNAPSE</b>\n\n"
         f"👑 <b>Подписка Premium:</b> {prem_status}\n"
         f"🤖 <b>Активный режим ИИ:</b> <b>{mode_label}</b>\n"
         f"🔄 <b>Автоответ в бизнес-чатах:</b> <b>{auto_label}</b>\n"
         f"📝 <b>Лимит памяти диалога:</b> <b>{max_h} сообщений</b>\n"
+        f"📢 <b>Канал для публикаций:</b> <b>{channel_label}</b>\n"
         f"🎭 <b>Роль автоответчика:</b> <i>{persona_label}</i>\n\n"
         "ℹ️ <b>SYNAPSE AGENT:</b> Вы можете запустить автономного агента, нажав на кнопку <b>Agent</b> рядом с полем ввода сообщения в этом чате.\n\n"
         "💡 <i>Используйте команду /persona для настройки уникальной роли автоответчика.</i>"
@@ -950,6 +980,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     auto = settings.get("auto_reply", True)
     max_h = settings.get("max_history", 20)
     persona = settings.get("persona", "")
+    channel = settings.get("publish_channel", "")
+    channel_label = channel if channel else "не задан"
 
     mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
     auto_label = "✅ Вкл" if auto else "❌ Выкл"
@@ -958,7 +990,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     is_prem = is_premium_user(user)
     prem_status = "Активна 👑" if is_prem else "Не активна ❌"
 
-    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
+    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -974,6 +1006,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 f"🔄 Авто-ответ: {'✅' if auto else '❌'}",
                 callback_data="settings:auto_reply:toggle",
             ),
+            InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
         ],
         [
             InlineKeyboardButton("📝 10", callback_data="settings:max_history:10"),
@@ -1889,6 +1922,65 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         return
 
+    if data == "settings:channel:edit":
+        await query.answer()
+        user_state[user_id] = "awaiting_publish_channel"
+        text = (
+            "📢 <b>Настройка канала для публикаций</b>\n\n"
+            "Отправьте юзернейм канала (например, <code>@my_channel</code>) или его числовой ID (например, <code>-1001234567890</code>).\n\n"
+            "⚠️ <b>Важно:</b> Бот должен быть добавлен в ваш канал в качестве <b>администратора</b> с правом публикации сообщений!"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")]])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
+
+    if data.startswith("post:publish:"):
+        await query.answer()
+        draft_id = data.split(":")[-1]
+        settings = get_settings(user_id)
+        publish_channel = settings.get("publish_channel")
+        
+        if not publish_channel:
+            await query.message.reply_text("❌ <b>Канал для публикаций не настроен!</b> Пожалуйста, перейдите в ⚙️ Настройки -> Настроить канал.", parse_mode=ParseMode.HTML)
+            return
+
+        post_text = post_drafts.get(draft_id)
+        if not post_text:
+            await query.edit_message_text("❌ Черновик поста не найден или уже опубликован.", parse_mode=ParseMode.HTML)
+            return
+
+        try:
+            sent_msg = await context.bot.send_message(
+                chat_id=publish_channel,
+                text=md_to_html(post_text),
+                parse_mode=ParseMode.HTML
+            )
+            
+            channel_username = publish_channel.lstrip("@")
+            post_link = f"https://t.me/{channel_username}/{sent_msg.message_id}" if not publish_channel.startswith("-100") else None
+            link_html = f"\n\n🔗 <b>Ссылка на пост:</b> <a href=\"{post_link}\">Открыть пост</a>" if post_link else ""
+
+            await query.edit_message_text(
+                f"✅ <b>Пост успешно опубликован в канале {publish_channel}!</b>{link_html}",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+            
+            post_drafts.pop(draft_id, None)
+            _save_post_drafts()
+        except Exception as e:
+            logger.error("Ошибка при публикации поста в канал: %s", e)
+            await query.message.reply_text("❌ <b>Не удалось опубликовать пост.</b> Убедитесь, что бот добавлен в канал и имеет права администратора на отправку сообщений.", parse_mode=ParseMode.HTML)
+        return
+
+    if data.startswith("post:cancel:"):
+        await query.answer()
+        draft_id = data.split(":")[-1]
+        post_drafts.pop(draft_id, None)
+        _save_post_drafts()
+        await query.edit_message_text("❌ <b>Публикация отменена.</b>", parse_mode=ParseMode.HTML)
+        return
+
     if data == "action:settings":
         user = query.from_user
         is_prem = is_premium_user(user)
@@ -1899,12 +1991,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
+        channel = settings.get("publish_channel", "")
+        channel_label = channel if channel else "не задан"
 
         mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1913,6 +2007,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ],
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+                InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
             ],
             [
                 InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
@@ -2814,6 +2909,67 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"⚠️ Произошла ошибка во время настройки: {err}\nСостояние сброшено, попробуйте еще раз.")
             return
 
+    if state == "awaiting_publish_channel":
+        channel_input = user_text.strip()
+        if not channel_input.startswith("@") and not channel_input.startswith("-100"):
+            user_state[user_id] = state
+            await update.message.reply_text("❌ <b>Неверный формат канала.</b>\nПожалуйста, укажите юзернейм канала с @ (например, <code>@my_channel</code>) или числовой ID, начинающийся с <code>-100</code>.", parse_mode=ParseMode.HTML)
+            return
+
+        try:
+            member = await context.bot.get_chat_member(chat_id=channel_input, user_id=context.bot.id)
+            if member.status not in ("administrator", "creator"):
+                user_state[user_id] = state
+                await update.message.reply_text("❌ <b>Бот найден в этом канале, но он не является там администратором.</b>\nПожалуйста, сделайте бота администратором в вашем канале и предоставьте права на публикацию сообщений.", parse_mode=ParseMode.HTML)
+                return
+        except Exception as e:
+            user_state[user_id] = state
+            logger.warning("Не удалось получить доступ к каналу %s: %s", channel_input, e)
+            await update.message.reply_text("❌ <b>Не удалось найти канал или получить к нему доступ.</b>\nУбедитесь, что:\n1. Бот добавлен в канал в качестве администратора.\n2. Название канала/ID указано верно.\n\nПопробуйте ещё раз:", parse_mode=ParseMode.HTML)
+            return
+
+        settings = get_settings(user_id)
+        settings["publish_channel"] = channel_input
+        _save_settings()
+
+        await update.message.reply_text(f"✅ <b>Канал {channel_input} успешно привязан для публикаций!</b>", parse_mode=ParseMode.HTML)
+        
+        is_prem = is_premium_user(update.effective_user)
+        prem_status = "Активна 👑" if is_prem else "Не активна ❌"
+        mode = user_mode.get(user_id, "default")
+        auto = settings.get("auto_reply", True)
+        max_h = settings.get("max_history", 20)
+        persona = settings.get("persona", "")
+        channel_label = channel_input
+
+        mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
+        auto_label = "✅ Вкл" if auto else "❌ Выкл"
+        persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
+
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👑 Премиум-подписка", callback_data="action:premium"),
+                InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
+            ],
+            [
+                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+                InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
+            ],
+            [
+                InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
+                InlineKeyboardButton("📝 История: 20", callback_data="settings:max_history:20"),
+                InlineKeyboardButton("📝 История: 50", callback_data="settings:max_history:50"),
+            ],
+            [
+                InlineKeyboardButton("🎭 Изменить личность", callback_data="persona:prompt"),
+                InlineKeyboardButton("🗑️ Сбросить личность", callback_data="persona:reset"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")],
+        ])
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
+
     if state == "awaiting_think":
         allowed, reason = check_and_record_limit(update.effective_user, "think", 10)
         if not allowed:
@@ -2894,6 +3050,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     add_message(user_id, "user", [{"text": user_text}])
     history = get_history(user_id)
 
+    # Детекция запроса на создание поста для канала/ТГК
+    lower_text = user_text.lower().strip()
+    is_post_request = bool(re.search(r'\b(пост для тгк|пост для канала|пост в тгк|пост в канал)\b', lower_text))
+    
+    post_system_prompt = (
+        "Ты — профессиональный копирайтер. Напиши качественный, привлекательный пост для Telegram-канала на основе запроса пользователя. "
+        "Используй форматирование HTML (жирный <b>текст</b>, курсив <i>текст</i>, ссылки <a href=\"...\">ссылка</a>, код <code>код</code>). "
+        "ОБЯЗАТЕЛЬНО используй только поддерживаемые Telegram теги: <b>, <i>, <code>, <a>. Не используй markdown разметку вроде ** или *. "
+        "Используй абзацы, эмодзи и списки, чтобы сделать пост легко читаемым. Пост должен быть полностью готов к публикации. "
+        "Не пиши никакого вводного или выводного текста от себя, никаких фраз вроде 'Вот ваш пост:', только сам текст поста."
+    )
+    
+    system_inst = post_system_prompt if is_post_request else SYSTEM_PROMPT_DEFAULT
+
+    keyboard = None
+    draft_id = None
+    if is_post_request:
+        draft_id = f"draft_{int(time.time())}_{random.randint(1000, 9999)}"
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📢 Опубликовать", callback_data=f"post:publish:{draft_id}"),
+                InlineKeyboardButton("❌ Отменить", callback_data=f"post:cancel:{draft_id}")
+            ]
+        ])
+
     # Определяем провайдера и модель на основе выбранного режима
     if mode == "claude":
         provider = "openrouter"
@@ -2912,18 +3093,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 provider=provider,
                 model=model,
                 history=history,
-                system_instruction=SYSTEM_PROMPT_DEFAULT,
+                system_instruction=system_inst,
                 stream=True,
                 max_tokens=8192
             )
-            reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
+            reply_text = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
         else:
             stream_config = types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT_DEFAULT,
+                system_instruction=system_inst,
                 max_output_tokens=8192,
             )
             stream_iter = gemini_stream(contents=history, config=stream_config)
-            reply_text = await native_stream_reply(update, context.bot.token, stream_iter)
+            reply_text = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
             
     except Exception as exc:
         logger.error("Ошибка API (%s / %s): %s", provider, model, exc)
@@ -2933,6 +3114,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
+        if is_post_request and draft_id:
+            post_drafts[draft_id] = reply_text
+            _save_post_drafts()
 
 # ---------------------------------------------------------------------------
 # Инлайн-режим
