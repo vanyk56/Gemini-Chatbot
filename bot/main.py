@@ -2955,7 +2955,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"⚠️ Произошла ошибка во время настройки: {err}\nСостояние сброшено, попробуйте еще раз.")
             return
 
-    if state and state.startswith("awaiting_post_edit:"):
+    if state and state.startswith("awaiting_post_edit_manual:"):
         draft_id = state.split(":")[-1]
         post_drafts[draft_id] = user_text
         _save_post_drafts()
@@ -2978,6 +2978,77 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if update.effective_chat.type == "private":
             user_menu_msg[update.effective_chat.id] = msg.message_id
+        return
+
+    if state and state.startswith("awaiting_post_edit_ai:"):
+        draft_id = state.split(":")[-1]
+        old_text = post_drafts.get(draft_id)
+        if not old_text:
+            await update.message.reply_text("❌ Черновик поста не найден. Пожалуйста, создайте пост заново.")
+            return
+            
+        instructions = user_text
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        
+        edit_system_prompt = (
+            "Ты — профессиональный копирайтер. Твоя задача — отредактировать предложенный текст поста для Telegram-канала на основе указаний пользователя.\n\n"
+            "Исходный текст поста:\n"
+            f"{old_text}\n\n"
+            "Инструкции пользователя:\n"
+            f"{instructions}\n\n"
+            "Правила:\n"
+            "1. Верни только новый (отредактированный) текст поста.\n"
+            "2. Не пиши никаких объяснений, преамбул, фраз вроде 'Вот отредактированный пост' или 'Готово'. Только сам текст поста.\n"
+            "3. Используй только поддерживаемые Telegram теги HTML: <b>, <i>, <code>, <a>. Не используй markdown разметку вроде ** или *."
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📢 Опубликовать", callback_data=f"post:publish:{draft_id}"),
+                InlineKeyboardButton("✏️ Редактировать", callback_data=f"post:edit:{draft_id}"),
+                InlineKeyboardButton("❌ Отменить", callback_data=f"post:cancel:{draft_id}")
+            ]
+        ])
+        
+        mode = user_mode.get(user_id, "default")
+        if mode == "claude":
+            provider = "openrouter"
+            model = "anthropic/claude-sonnet-5"
+        else:
+            if os.environ.get("OPENROUTER_API_KEY"):
+                provider = "openrouter"
+                model = "google/gemini-2.5-flash-lite"
+            else:
+                provider = "gemini"
+                model = MODEL
+
+        try:
+            if provider in ("openrouter", "omniroute"):
+                stream_iter = await call_external_llm(
+                    provider=provider,
+                    model=model,
+                    history=[],
+                    system_instruction=edit_system_prompt,
+                    stream=True,
+                    max_tokens=8192
+                )
+                reply_text = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
+            else:
+                stream_config = types.GenerateContentConfig(
+                    system_instruction=edit_system_prompt,
+                    max_output_tokens=8192,
+                )
+                stream_iter = gemini_stream(contents=[{"role": "user", "parts": [{"text": "Пожалуйста, отредактируй пост по инструкции."}]}], config=stream_config)
+                reply_text = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
+                
+            if reply_text:
+                post_drafts[draft_id] = reply_text
+                _save_post_drafts()
+                
+        except Exception as exc:
+            logger.error("Ошибка при редактировании поста ИИ (%s / %s): %s", provider, model, exc)
+            await update.message.reply_text("⚠️ Не удалось отредактировать пост с помощью ИИ. Попробуйте ещё раз.")
+            
         return
 
     if state == "awaiting_publish_channel":
