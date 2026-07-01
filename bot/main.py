@@ -2681,6 +2681,69 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    user_id = user.id
+
+    if not update.message.voice:
+        await update.message.reply_text("⚠️ Не удалось получить голосовое сообщение.")
+        return
+
+    if not client:
+        await update.message.reply_text("❌ Функция распознавания голоса недоступна (отсутствует API-ключ Gemini).")
+        return
+
+    status_msg = await update.message.reply_text("⏳ <b>Распознаю вашу речь...</b>", parse_mode=ParseMode.HTML)
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="record_voice")
+
+    try:
+        voice_file = await update.message.voice.get_file()
+        
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            await voice_file.download_to_drive(tmp_path)
+            
+            with open(tmp_path, "rb") as f:
+                voice_bytes = f.read()
+                
+            base64_data = base64.b64encode(voice_bytes).decode()
+            
+            audio_part = {
+                "inline_data": {
+                    "mime_type": "audio/ogg",
+                    "data": base64_data
+                }
+            }
+            
+            response = gemini_generate(
+                contents=[
+                    audio_part,
+                    {"text": "Пожалуйста, расшифруй это аудиосообщение на языке оригинала. Выведи ТОЛЬКО текст расшифровки без каких-либо комментариев, вводных фраз или знаков препинания в начале."}
+                ],
+                config=types.GenerateContentConfig(max_output_tokens=1000)
+            )
+            
+            transcription = (response.text or "").strip()
+            
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+        if not transcription:
+            await status_msg.edit_text("❌ Не удалось разобрать речь. Пожалуйста, говорите чётче.")
+            return
+
+        await status_msg.edit_text(f"🗣️ <b>Распознано:</b>\n<i>«{transcription}»</i>", parse_mode=ParseMode.HTML)
+        await handle_message(update, context, override_text=transcription)
+
+    except Exception as exc:
+        logger.error("Ошибка при расшифровке голосового сообщения: %s", exc)
+        await status_msg.edit_text("⚠️ Произошла ошибка при расшифровке вашего голосового сообщения. Попробуйте ещё раз.")
+
 async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
     user_id = update.effective_user.id
     is_owner = bool(update.effective_user.username and update.effective_user.username.lower() == "ohakol")
@@ -2819,9 +2882,9 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # ---------------------------------------------------------------------------
 # Текстовые сообщения в обычном чате
 # ---------------------------------------------------------------------------
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, override_text: str = None) -> None:
     user_id = update.effective_user.id
-    user_text = update.message.text or ""
+    user_text = override_text if override_text is not None else (update.message.text or "")
 
     # Проверяем состояние ожидания ввода ( think / image / scheduler )
     state = user_state.pop(user_id, None)
@@ -3760,6 +3823,9 @@ def main() -> None:
     # Изображения
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_photo))
+
+    # Голосовые сообщения
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     # Текст
     _group_mention_filter = (
