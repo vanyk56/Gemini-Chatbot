@@ -569,7 +569,7 @@ def get_premium_info_text(user, user_id: int, is_prem: bool, status_text: str) -
         "3️⃣ <b>Генерация картинок сверхвысокого качества с моделью Gemini 3.1 Flash Image (/image)</b>\n"
         "4️⃣ <b>Планирование сообщений в бизнес-аккаунте (/schedule)</b>\n\n"
         "💡 <i>Лимиты обновляются автоматически каждые 7 дней с момента использования запросов.</i>\n\n"
-        "⭐️ <b>Купить звёзды для оплаты:</b> @StarsMarkeet_bot"
+        "⭐️ <b><a href=\"https://t.me/StarsMarkeet_bot\">Купить звёзды для оплаты</a></b>"
     )
     return text
 
