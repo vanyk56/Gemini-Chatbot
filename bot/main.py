@@ -486,9 +486,10 @@ def is_premium_user(user) -> bool:
         return True
     return False
 
-def check_and_record_premium_request(user) -> tuple[bool, str]:
+def check_and_record_limit(user, limit_type: str, max_limit: int, record: bool = True) -> tuple[bool, str]:
     """
-    Проверяет лимиты премиум-пользователя.
+    Проверяет и записывает запрос для определенного типа лимита.
+    limit_type может быть: 'claude', 'think', 'image'
     Возвращает (allow: bool, reason: str).
     """
     if not user:
@@ -499,22 +500,78 @@ def check_and_record_premium_request(user) -> tuple[bool, str]:
     
     if not is_premium_user(user):
         return False, "need_premium"
+        
+    user_info = premium_users.setdefault(user.id, {})
     
-    user_info = premium_users.get(user.id, {})
+    key_name = f"requests_{limit_type}"
+    requests = user_info.setdefault(key_name, [])
+    
     # Скользящее окно: 7 дней (168 часов)
     now = time.time()
-    requests = user_info.setdefault("requests", [])
     filtered_requests = [r for r in requests if now - r < 7 * 24 * 3600]
     
-    if len(filtered_requests) >= 5:
-        user_info["requests"] = filtered_requests
+    if len(filtered_requests) >= max_limit:
+        user_info[key_name] = filtered_requests
         _save_premium_users()
         return False, "limit_exceeded"
         
-    filtered_requests.append(now)
-    user_info["requests"] = filtered_requests
-    _save_premium_users()
+    if record:
+        filtered_requests.append(now)
+        user_info[key_name] = filtered_requests
+        _save_premium_users()
+        
     return True, "allowed"
+
+def get_premium_info_text(user, user_id: int, is_prem: bool, status_text: str) -> str:
+    user_info = premium_users.get(user_id, {})
+    if user.username and user.username.lower() == "ohakol":
+        limit_text = (
+            "👑 <b>Безлимитные запросы</b> (Владелец)\n"
+        )
+    elif is_prem:
+        now = time.time()
+        
+        # Claude
+        claude_reqs = user_info.get("requests_claude", [])
+        filtered_claude = [r for r in claude_reqs if now - r < 7 * 24 * 3600]
+        rem_claude = max(0, 150 - len(filtered_claude))
+        
+        # Think
+        think_reqs = user_info.get("requests_think", [])
+        filtered_think = [r for r in think_reqs if now - r < 7 * 24 * 3600]
+        rem_think = max(0, 10 - len(filtered_think))
+        
+        # Image
+        image_reqs = user_info.get("requests_image", [])
+        filtered_image = [r for r in image_reqs if now - r < 7 * 24 * 3600]
+        rem_image = max(0, 10 - len(filtered_image))
+        
+        limit_text = (
+            f"🎭 Запросы к Claude: <b>{rem_claude} из 150</b>\n"
+            f"🧠 Глубокое мышление (/think): <b>{rem_think} из 10</b>\n"
+            f"🎨 Картинки (/image): <b>{rem_image} из 10</b>"
+        )
+    else:
+        limit_text = (
+            "🎭 Запросы к Claude: <b>0 из 150</b> (требуется Premium)\n"
+            "🧠 Глубокое мышление (/think): <b>0 из 10</b> (требуется Premium)\n"
+            "🎨 Картинки (/image): <b>0 из 10</b> (требуется Premium)"
+        )
+
+    text = (
+        "💎 <b>SYNAPSE PREMIUM</b> 💎\n\n"
+        f"📍 <b>Статус подписки:</b> {status_text}\n\n"
+        f"📊 <b>Ваши доступные лимиты на неделю:</b>\n"
+        f"{limit_text}\n\n"
+        "✨ <b>Преимущества подписки Premium:</b>\n"
+        "1️⃣ <b>Доступ к умной модели Claude (Sonnet 3.5)</b>\n"
+        "2️⃣ <b>Глубокое логическое мышление (/think)</b>\n"
+        "3️⃣ <b>Генерация картинок сверхвысокого качества с моделью Gemini 3.1 Flash Image (/image)</b>\n"
+        "4️⃣ <b>Планирование сообщений в бизнес-аккаунте (/schedule)</b>\n\n"
+        "💡 <i>Лимиты обновляются автоматически каждые 7 дней с момента использования запросов.</i>\n\n"
+        "⭐️ <b>Купить звёзды для оплаты:</b> @StarsMarkeet_bot"
+    )
+    return text
 
 def _load_state() -> None:
     global user_mode, user_settings, business_connections
@@ -655,7 +712,7 @@ def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
     mode = user_mode.get(user_id, "default")
     
     gemini_label = "🤖 Gemini (Бесплатно) ✅" if mode == "default" else "🤖 Gemini (Бесплатно)"
-    claude_label = "👑 Claude Opus (Премиум) ✅" if mode == "claude" else "👑 Claude Opus (Премиум)"
+    claude_label = "👑 Claude ✅" if mode == "claude" else "👑 Claude"
     
     keyboard = [
         [
@@ -880,7 +937,15 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_claude(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not is_premium_user(user):
-        await update.message.reply_text("❌ Этот режим доступен только по Premium подписке! Оформите её с помощью /premium.")
+        status_text = "❌ <b>Не активна</b>"
+        text = get_premium_info_text(user, user.id, False, status_text)
+        keyboard_buttons = [
+            [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+            [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+            [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")]
+        ]
+        keyboard = InlineKeyboardMarkup(keyboard_buttons)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         return
     set_user_mode(user.id, "claude")
     await update.message.reply_text("🎭 <b>Режим Claude активирован!</b>", parse_mode=ParseMode.HTML)
@@ -920,12 +985,12 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     user = update.effective_user
-    allowed, reason = check_and_record_premium_request(user)
+    allowed, reason = check_and_record_limit(user, "think", 10)
     if not allowed:
         if reason == "need_premium":
             await update.message.reply_text("❌ Функция Глубокого мышления доступна только по Premium подписке! Оформите её с помощью /premium.")
         elif reason == "limit_exceeded":
-            await update.message.reply_text("❌ Вы исчерпали лимит 5 запросов Глубокого мышления в неделю!")
+            await update.message.reply_text("❌ Вы исчерпали лимит 10 запросов Глубокого мышления в неделю!")
         return
 
     await handle_think_logic(update, context, query)
@@ -949,7 +1014,7 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
         try:
             mode = user_mode.get(user_id, "default")
             if mode == "claude":
-                translation = await call_external_llm("openrouter", "anthropic/claude-opus-4.8", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
+                translation = await call_external_llm("openrouter", "anthropic/claude-3.5-sonnet", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
             else:
                 if os.environ.get("OPENROUTER_API_KEY"):
                     translation = await call_external_llm("openrouter", "google/gemini-2.5-flash-lite", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
@@ -976,7 +1041,7 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "X-Title": "Telegram Bot"
         }
         payload = {
-            "model": "sourceful/riverflow-v2.5-fast",
+            "model": "google/gemini-3.1-flash-image",
             "messages": [{"role": "user", "content": english_prompt}],
             "modalities": ["image"]
         }
@@ -1065,6 +1130,16 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not prompt:
         await update.message.reply_text("✏️ Напишите описание картинки.", parse_mode=ParseMode.HTML)
         return
+
+    user = update.effective_user
+    allowed, reason = check_and_record_limit(user, "image", 10)
+    if not allowed:
+        if reason == "need_premium":
+            await update.message.reply_text("❌ Генерация изображений доступна только по Premium подписке! Оформите её с помощью /premium.")
+        elif reason == "limit_exceeded":
+            await update.message.reply_text("❌ Вы исчерпали лимит 10 изображений в неделю!")
+        return
+
     await handle_image_logic(update, context, prompt)
 
 # ---------------------------------------------------------------------------
@@ -1124,28 +1199,8 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             status_text = "👑 <b>Активна (Бессрочно)</b>"
     else:
         status_text = "❌ <b>Не активна</b>"
-    
-    # Считаем количество оставшихся запросов на этой неделе
-    if user.username and user.username.lower() == "ohakol":
-        limit_text = "Бесконечно запросов (Владелец)"
-    elif is_prem:
-        now = time.time()
-        requests = user_info.get("requests", [])
-        filtered_requests = [r for r in requests if now - r < 7 * 24 * 3600]
-        remaining = max(0, 5 - len(filtered_requests))
-        limit_text = f"{remaining} из 5 запросов осталось на этой неделе"
-    else:
-        limit_text = "0 из 5 запросов доступно (требуется Premium)"
 
-    text = (
-        "👑 <b>SYNAPSE Premium</b>\n\n"
-        f"Статус вашей подписки: {status_text}\n"
-        f"Ваш лимит: <b>{limit_text}</b>\n\n"
-        "Премиум-подписка открывает доступ к:\n"
-        "1. 🎭 Режиму <b>Claude Opus (Премиум)</b>\n"
-        "2. 🧠 Функции <b>Глубокого мышления</b>\n\n"
-        "Лимит для обычных премиум-пользователей составляет <b>5 запросов в неделю</b>."
-    )
+    text = get_premium_info_text(user, user_id, is_prem, status_text)
 
     keyboard_buttons = [
         [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
@@ -1474,12 +1529,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         months = int(data.split(":")[-1])
         if months == 1:
             title = "SYNAPSE Premium (1 месяц)"
-            description = "Доступ к Claude Opus, Глубокому мышлению и планированию сообщений на 1 месяц."
+            description = "Доступ к Claude, Глубокому мышлению и планированию сообщений на 1 месяц."
             payload = "premium_1_month"
             price = 299
         else:
             title = "SYNAPSE Premium (3 месяца)"
-            description = "Доступ к Claude Opus, Глубокому мышлению и планированию сообщений на 3 месяца."
+            description = "Доступ к Claude, Глубокому мышлению и планированию сообщений на 3 месяца."
             payload = "premium_3_months"
             price = 799
 
@@ -1509,17 +1564,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("Премиум-подписка активирована!")
         
         status_text = "👑 <b>Активна</b>"
-        limit_text = "5 из 5 запросов осталось на этой неделе"
-        
-        text = (
-            "👑 <b>SYNAPSE Premium</b>\n\n"
-            f"Статус вашей подписки: {status_text}\n"
-            f"Ваш лимит: <b>{limit_text}</b>\n\n"
-            "Премиум-подписка открывает доступ к:\n"
-            "1. 🎭 Режиму <b>Claude Opus (Премиум)</b>\n"
-            "2. 🧠 Функции <b>Глубокого мышления</b>\n\n"
-            "Лимит для обычных премиум-пользователей составляет <b>5 запросов в неделю</b>."
-        )
+        text = get_premium_info_text(query.from_user, user_id, True, status_text)
         
         if "settings" in data:
             keyboard = InlineKeyboardMarkup([
@@ -1547,26 +1592,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             status_text = "❌ <b>Не активна</b>"
 
-        if user.username and user.username.lower() == "ohakol":
-            limit_text = "Бесконечно запросов (Владелец)"
-        elif is_prem:
-            now = time.time()
-            requests = user_info.get("requests", [])
-            filtered_requests = [r for r in requests if now - r < 7 * 24 * 3600]
-            remaining = max(0, 5 - len(filtered_requests))
-            limit_text = f"{remaining} из 5 запросов осталось на этой неделе"
-        else:
-            limit_text = "0 из 5 запросов доступно (требуется Premium)"
-
-        text = (
-            "👑 <b>SYNAPSE Premium</b>\n\n"
-            f"Статус вашей подписки: {status_text}\n"
-            f"Ваш лимит: <b>{limit_text}</b>\n\n"
-            "Премиум-подписка открывает доступ к:\n"
-            "1. 🎭 Режиму <b>Claude Opus (Премиум)</b>\n"
-            "2. 🧠 Функции <b>Глубокого мышления</b>\n\n"
-            "Лимит для обычных премиум-пользователей составляет <b>5 запросов в неделю</b>."
-        )
+        text = get_premium_info_text(user, user_id, is_prem, status_text)
 
         keyboard_buttons = [
             [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
@@ -1596,8 +1622,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "action:think":
         user = query.from_user
-        if not is_premium_user(user):
-            await query.answer("❌ Глубокое мышление доступно только по Premium подписке!", show_alert=True)
+        allowed, reason = check_and_record_limit(user, "think", 10, record=False)
+        if not allowed:
+            if reason == "need_premium":
+                await query.answer("❌ Глубокое мышление доступно только по Premium подписке!", show_alert=True)
+            elif reason == "limit_exceeded":
+                await query.answer("❌ Вы исчерпали лимит 10 запросов Глубокого мышления в неделю!", show_alert=True)
             return
             
         user_state[user_id] = "awaiting_think"
@@ -1613,6 +1643,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "action:image":
+        user = query.from_user
+        allowed, reason = check_and_record_limit(user, "image", 10, record=False)
+        if not allowed:
+            if reason == "need_premium":
+                await query.answer("❌ Генерация изображений доступна только по Premium подписке!", show_alert=True)
+            elif reason == "limit_exceeded":
+                await query.answer("❌ Вы исчерпали лимит 10 изображений в неделю!", show_alert=True)
+            return
+
         user_state[user_id] = "awaiting_image"
         await query.edit_message_text(
             "🎨 <b>Режим генерации изображений активирован.</b>\n\n"
@@ -1694,12 +1733,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("mode:"):
         new_mode = data.split(":")[1]
         if new_mode == "claude" and not is_premium_user(query.from_user):
-            await query.answer("❌ Claude Opus доступен только по Premium подписке!", show_alert=True)
+            await query.answer()
+            status_text = "❌ <b>Не активна</b>"
+            text = get_premium_info_text(query.from_user, user_id, False, status_text)
+            keyboard_buttons = [
+                [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+                [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+                [InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")]
+            ]
+            keyboard = InlineKeyboardMarkup(keyboard_buttons)
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             return
             
         conversation_history.pop(str(user_id), None)
         set_user_mode(user_id, new_mode)
-        label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(new_mode, new_mode)
+        label = {"default": "Gemini (Бесплатно)", "claude": "Claude"}.get(new_mode, new_mode)
         
         await query.edit_message_reply_markup(reply_markup=get_main_keyboard(user_id))
         await query.answer(f"Режим изменен на {label}")
@@ -1785,7 +1833,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
         agent_token = settings.get("agent_token")
-        mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude Opus (Премиум)"}.get(mode, mode)
+        mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
@@ -2025,12 +2073,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = user.id
     mode = user_mode.get(user_id, "default")
     if mode == "claude":
-        allowed, reason = check_and_record_premium_request(user)
+        allowed, reason = check_and_record_limit(user, "claude", 150)
         if not allowed:
             if reason == "need_premium":
                 await update.message.reply_text("❌ Режим Claude доступен только по Premium подписке! Переключаю вас на Gemini.")
             elif reason == "limit_exceeded":
-                await update.message.reply_text("❌ Вы исчерпали лимит 5 премиум-запросов в неделю! Переключаю вас на Gemini.")
+                await update.message.reply_text("❌ Вы исчерпали лимит 150 премиум-запросов к Claude в неделю! Переключаю вас на Gemini.")
             set_user_mode(user_id, "default")
             mode = "default"
 
@@ -2102,7 +2150,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         mode = user_mode.get(user_id, "default")
         if mode == "claude":
             provider = "openrouter"
-            model = "anthropic/claude-opus-4.8"
+            model = "anthropic/claude-3.5-sonnet"
         else:
             if os.environ.get("OPENROUTER_API_KEY"):
                 provider = "openrouter"
@@ -2288,12 +2336,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
     if state == "awaiting_think":
-        allowed, reason = check_and_record_premium_request(update.effective_user)
+        allowed, reason = check_and_record_limit(update.effective_user, "think", 10)
         if not allowed:
             if reason == "need_premium":
                 await update.message.reply_text("❌ Функция Глубокого мышления доступна только по Premium подписке! Оформите её с помощью /premium.")
             elif reason == "limit_exceeded":
-                await update.message.reply_text("❌ Вы исчерпали лимит 5 запросов Глубокого мышления в неделю!")
+                await update.message.reply_text("❌ Вы исчерпали лимит 10 запросов Глубокого мышления в неделю!")
             if update.effective_chat.type == "private":
                 await send_new_menu(update.effective_chat.id, context, user_id)
             return
@@ -2305,6 +2353,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await send_new_menu(update.effective_chat.id, context, user_id)
         return
     elif state == "awaiting_image":
+        allowed, reason = check_and_record_limit(update.effective_user, "image", 10)
+        if not allowed:
+            if reason == "need_premium":
+                await update.message.reply_text("❌ Генерация изображений доступна только по Premium подписке! Оформите её с помощью /premium.")
+            elif reason == "limit_exceeded":
+                await update.message.reply_text("❌ Вы исчерпали лимит 10 изображений в неделю!")
+            if update.effective_chat.type == "private":
+                await send_new_menu(update.effective_chat.id, context, user_id)
+            return
+
         if update.effective_chat.type == "private":
             await delete_old_menu(update.effective_chat.id, context)
         await handle_image_logic(update, context, user_text)
@@ -2316,12 +2374,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     mode = user_mode.get(user_id, "default")
 
     if mode == "claude":
-        allowed, reason = check_and_record_premium_request(update.effective_user)
+        allowed, reason = check_and_record_limit(update.effective_user, "claude", 150)
         if not allowed:
             if reason == "need_premium":
                 await update.message.reply_text("❌ Режим Claude доступен только по Premium подписке! Переключаю вас на Gemini.")
             elif reason == "limit_exceeded":
-                await update.message.reply_text("❌ Вы исчерпали лимит 5 премиум-запросов в неделю! Переключаю вас на Gemini.")
+                await update.message.reply_text("❌ Вы исчерпали лимит 150 премиум-запросов к Claude в неделю! Переключаю вас на Gemini.")
             set_user_mode(user_id, "default")
             mode = "default"
 
@@ -2352,7 +2410,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Определяем провайдера и модель на основе выбранного режима
     if mode == "claude":
         provider = "openrouter"
-        model = "anthropic/claude-opus-4.8"
+        model = "anthropic/claude-3.5-sonnet"
     else:
         if os.environ.get("OPENROUTER_API_KEY"):
             provider = "openrouter"
@@ -2412,7 +2470,7 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_id = user.id
     mode = user_mode.get(user_id, "default")
     if mode == "claude":
-        allowed, reason = check_and_record_premium_request(user)
+        allowed, reason = check_and_record_limit(user, "claude", 150)
         if not allowed:
             set_user_mode(user_id, "default")
             mode = "default"
@@ -2421,7 +2479,7 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if mode == "claude":
             answer_raw = await call_external_llm(
                 provider="openrouter",
-                model="anthropic/claude-opus-4.8",
+                model="anthropic/claude-3.5-sonnet",
                 history=[{"role": "user", "parts": [{"text": user_text}]}],
                 system_instruction=SYSTEM_PROMPT_DEFAULT,
                 stream=False,
@@ -2756,7 +2814,7 @@ async def post_init(app) -> None:
     await app.bot.set_my_commands([
         BotCommand("start",    "👋 Главное меню бота"),
         BotCommand("gemini",   "🤖 Режим Gemini (Бесплатно)"),
-        BotCommand("claude",   "👑 Режим Claude Opus (Премиум)"),
+        BotCommand("claude",   "👑 Режим Claude"),
         BotCommand("think",    "🧠 Глубокое мышление"),
         BotCommand("image",    "🎨 Генерация картинок"),
         BotCommand("history",  "📜 Управление историей"),
