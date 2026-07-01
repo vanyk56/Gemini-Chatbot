@@ -778,6 +778,8 @@ async def show_video_menu(query, context, user_id: int) -> None:
     balance = user_video_limits.get(user_id, 0)
     current_model = user_video_model.get(user_id, "google/veo-3.1-lite")
     
+    is_owner = bool(query.from_user.username and query.from_user.username.lower() == "ohakol")
+    
     grok_label = "Grok Imagine ✅" if current_model == "x-ai/grok-imagine-video" else "Grok Imagine"
     veo_label = "Veo ✅" if current_model == "google/veo-3.1-lite" else "Veo"
     kling_label = "Kling ✅" if current_model == "kwaivgi/kling-v3.0-std" else "Kling"
@@ -793,7 +795,7 @@ async def show_video_menu(query, context, user_id: int) -> None:
         ]
     ]
     
-    if balance > 0:
+    if balance > 0 or is_owner:
         keyboard_buttons.append([InlineKeyboardButton("🎬 Создать видео", callback_data="video:generate:prompt")])
         
     keyboard_buttons.append([InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")])
@@ -805,9 +807,11 @@ async def show_video_menu(query, context, user_id: int) -> None:
         "kwaivgi/kling-v3.0-std": "Kling"
     }.get(current_model, current_model)
     
+    balance_display = "♾️ (Владелец)" if is_owner else f"{balance} видео"
+    
     text = (
         "🎥 <b>ГЕНЕРАЦИЯ ВИДЕО (AI VIDEO)</b>\n\n"
-        f"💰 <b>Ваш баланс:</b> {balance} видео\n"
+        f"💰 <b>Ваш баланс:</b> {balance_display}\n"
         f"🤖 <b>Активная модель:</b> <b>{model_clean_name}</b>\n\n"
         "Для создания видео выберите одну из моделей выше, а затем нажмите <b>🎬 Создать видео</b>, чтобы отправить текстовый промпт.\n\n"
         "💡 <i>Если у вас закончились генерации, выберите пакет для покупки за звёзды.</i>"
@@ -1870,7 +1874,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "video:generate:prompt":
         balance = user_video_limits.get(user_id, 0)
-        if balance <= 0:
+        is_owner = bool(query.from_user.username and query.from_user.username.lower() == "ohakol")
+        if balance <= 0 and not is_owner:
             await query.answer("❌ У вас нет видео-генераций на балансе!", show_alert=True)
             return
         user_state[user_id] = "awaiting_video_prompt"
@@ -2537,8 +2542,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
     user_id = update.effective_user.id
+    is_owner = bool(update.effective_user.username and update.effective_user.username.lower() == "ohakol")
     balance = user_video_limits.get(user_id, 0)
-    if balance <= 0:
+    if balance <= 0 and not is_owner:
         await update.message.reply_text("❌ У вас нет видео-генераций на балансе! Приобретите пакет видео в меню генерации видео.")
         return
 
@@ -2557,8 +2563,9 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
     )
 
     # Уменьшаем баланс
-    user_video_limits[user_id] = balance - 1
-    _save_video_limits()
+    if not is_owner:
+        user_video_limits[user_id] = balance - 1
+        _save_video_limits()
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -2612,11 +2619,12 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
             await status_msg.edit_text("⏳ <b>Видео сгенерировано! Отправляю...</b>", parse_mode=ParseMode.HTML)
 
+            balance_left_str = "♾️ (Владелец)" if is_owner else f"{user_video_limits[user_id]} видео"
             caption = (
                 f"🎥 <b>Видео готово!</b>\n\n"
                 f"📝 Промпт: <i>{prompt}</i>\n"
                 f"🤖 Модель: <b>{model_display}</b>\n\n"
-                f"💰 Остаток баланса: <b>{user_video_limits[user_id]} видео</b>"
+                f"💰 Остаток баланса: <b>{balance_left_str}</b>"
             )
 
             try:
@@ -2654,11 +2662,16 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     except Exception as e:
         logger.error("Ошибка при генерации видео: %s", e)
-        user_video_limits[user_id] = user_video_limits.get(user_id, 0) + 1
-        _save_video_limits()
+        if not is_owner:
+            user_video_limits[user_id] = user_video_limits.get(user_id, 0) + 1
+            _save_video_limits()
+            balance_restored_str = f"Баланс восстановлен. Текущий баланс: <b>{user_video_limits[user_id]} видео</b>."
+        else:
+            balance_restored_str = ""
+            
         await status_msg.edit_text(
             f"❌ <b>Ошибка генерации видео:</b>\n{e}\n\n"
-            f"Баланс восстановлен. Текущий баланс: <b>{user_video_limits[user_id]} видео</b>.",
+            f"{balance_restored_str}",
             parse_mode=ParseMode.HTML
         )
 
