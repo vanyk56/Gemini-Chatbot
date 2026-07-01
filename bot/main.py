@@ -1146,7 +1146,20 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # Интеграция с Telegram Business: включение/выключение чатов
 # ---------------------------------------------------------------------------
 async def cmd_automate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
+    user = update.effective_user
+    if not is_premium_user(user):
+        status_text = "❌ <b>Не активна</b>"
+        text = get_premium_info_text(user, user.id, False, status_text)
+        keyboard_buttons = [
+            [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+            [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+            [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")]
+        ]
+        keyboard = InlineKeyboardMarkup(keyboard_buttons)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
+
+    user_id = user.id
     settings = get_settings(user_id)
     disabled = settings.setdefault("disabled_chats", [])
     
@@ -1760,6 +1773,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         settings = get_settings(user_id)
 
         if key == "auto_reply" and val == "toggle":
+            if not is_premium_user(query.from_user):
+                await query.answer()
+                status_text = "❌ <b>Не активна</b>"
+                text = get_premium_info_text(query.from_user, user_id, False, status_text)
+                keyboard_buttons = [
+                    [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+                    [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+                    [InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")]
+                ]
+                keyboard = InlineKeyboardMarkup(keyboard_buttons)
+                await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                return
+
             settings["auto_reply"] = not settings.get("auto_reply", True)
             _save_settings()
             status = "включен" if settings["auto_reply"] else "выключен"
@@ -1983,6 +2009,11 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                 logger.debug("Не удалось удалить сообщение-команду /schedule: %s", e)
 
             await process_schedule_command(msg.from_user, msg.chat.id, conn_id, msg.text, reply_fn, context)
+        return
+
+    # Проверяем наличие Premium-подписки у владельца бизнес-аккаунта
+    owner_user = SimpleUser(owner_id)
+    if not is_premium_user(owner_user):
         return
 
     owner_settings = get_settings(owner_id)
