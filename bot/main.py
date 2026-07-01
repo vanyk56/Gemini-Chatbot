@@ -432,6 +432,46 @@ user_state: dict[int, str]                      = {}  # Состояние вв�
 premium_users: dict[int, dict]                  = {}  # user_id -> {"is_premium": bool, "requests": list[float]}
 user_schedule_drafts: dict[int, dict]           = {}  # user_id -> черновик отложенного сообщения
 
+VIDEO_LIMITS_FILE = Path("bot/video_limits.json")
+VIDEO_MODELS_FILE = Path("bot/video_models.json")
+user_video_limits: dict[int, int] = {}
+user_video_model: dict[int, str] = {}
+
+def _load_video_data() -> None:
+    global user_video_limits, user_video_model
+    if VIDEO_LIMITS_FILE.exists():
+        try:
+            data = json.loads(VIDEO_LIMITS_FILE.read_text(encoding="utf-8"))
+            user_video_limits = {int(k): int(v) for k, v in data.items()}
+            logger.info("Загружено лимитов видео: %d", len(user_video_limits))
+        except Exception as e:
+            logger.warning("Не удалось загрузить лимиты видео: %s", e)
+    if VIDEO_MODELS_FILE.exists():
+        try:
+            data = json.loads(VIDEO_MODELS_FILE.read_text(encoding="utf-8"))
+            user_video_model = {int(k): v for k, v in data.items()}
+            logger.info("Загружено предпочтений моделей видео: %d", len(user_video_model))
+        except Exception as e:
+            logger.warning("Не удалось загрузить модели видео: %s", e)
+
+def _save_video_limits() -> None:
+    try:
+        VIDEO_LIMITS_FILE.write_text(
+            json.dumps({str(k): v for k, v in user_video_limits.items()}, ensure_ascii=False),
+            encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning("Не удалось сохранить лимиты видео: %s", e)
+
+def _save_video_models() -> None:
+    try:
+        VIDEO_MODELS_FILE.write_text(
+            json.dumps({str(k): v for k, v in user_video_model.items()}, ensure_ascii=False),
+            encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning("Не удалось сохранить модели видео: %s", e)
+
 def _load_scheduled_tasks() -> list:
     if SCHEDULED_TASKS_FILE.exists():
         try:
@@ -576,6 +616,7 @@ def get_premium_info_text(user, user_id: int, is_prem: bool, status_text: str) -
 def _load_state() -> None:
     global user_mode, user_settings, business_connections
     _load_premium_users()
+    _load_video_data()
     if USER_MODE_FILE.exists():
         try:
             data = json.loads(USER_MODE_FILE.read_text(encoding="utf-8"))
@@ -724,11 +765,55 @@ def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎨 Генерация фото", callback_data="action:image"),
         ],
         [
+            InlineKeyboardButton("🎥 Генерация видео", callback_data="action:video"),
+        ],
+        [
             InlineKeyboardButton("⚙️ Настройки", callback_data="action:settings"),
             InlineKeyboardButton("🗑️ Очистить контекст", callback_data="history:clear"),
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+async def show_video_menu(query, context, user_id: int) -> None:
+    balance = user_video_limits.get(user_id, 0)
+    current_model = user_video_model.get(user_id, "google/veo-3.1-lite")
+    
+    grok_label = "Grok Imagine ✅" if current_model == "x-ai/grok-imagine-video" else "Grok Imagine"
+    veo_label = "Veo ✅" if current_model == "google/veo-3.1-lite" else "Veo"
+    kling_label = "Kling ✅" if current_model == "kwaivgi/kling-v3.0-std" else "Kling"
+    
+    keyboard_buttons = [
+        [
+            InlineKeyboardButton(grok_label, callback_data="video:model:grok"),
+            InlineKeyboardButton(veo_label, callback_data="video:model:veo"),
+            InlineKeyboardButton(kling_label, callback_data="video:model:kling")
+        ],
+        [
+            InlineKeyboardButton("⭐️ Купить 2 видео — 150 ⭐️", callback_data="video:buy:2")
+        ]
+    ]
+    
+    if balance > 0:
+        keyboard_buttons.append([InlineKeyboardButton("🎬 Создать видео", callback_data="video:generate:prompt")])
+        
+    keyboard_buttons.append([InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:back")])
+    keyboard = InlineKeyboardMarkup(keyboard_buttons)
+    
+    model_clean_name = {
+        "x-ai/grok-imagine-video": "Grok Imagine",
+        "google/veo-3.1-lite": "Veo",
+        "kwaivgi/kling-v3.0-std": "Kling"
+    }.get(current_model, current_model)
+    
+    text = (
+        "🎥 <b>ГЕНЕРАЦИЯ ВИДЕО (AI VIDEO)</b>\n\n"
+        f"💰 <b>Ваш баланс:</b> {balance} видео\n"
+        f"🤖 <b>Активная модель:</b> <b>{model_clean_name}</b>\n\n"
+        "Для создания видео выберите одну из моделей выше, а затем нажмите <b>🎬 Создать видео</b>, чтобы отправить текстовый промпт.\n\n"
+        "💡 <i>Если у вас закончились генерации, выберите пакет для покупки за звёзды.</i>"
+    )
+    
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------------------------------------------------------------------------
 # Логика плавающего меню
@@ -1722,6 +1807,72 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         return
 
+    if data == "action:video":
+        await query.answer()
+        await show_video_menu(query, context, user_id)
+        return
+
+    if data.startswith("video:model:"):
+        model_key = data.split(":")[-1]
+        if model_key == "grok":
+            user_video_model[user_id] = "x-ai/grok-imagine-video"
+            msg_txt = "Выбрана модель Grok Imagine"
+        elif model_key == "veo":
+            user_video_model[user_id] = "google/veo-3.1-lite"
+            msg_txt = "Выбрана модель Veo"
+        elif model_key == "kling":
+            user_video_model[user_id] = "kwaivgi/kling-v3.0-std"
+            msg_txt = "Выбрана модель Kling"
+        _save_video_models()
+        await query.answer(msg_txt)
+        await show_video_menu(query, context, user_id)
+        return
+
+    if data == "video:buy:2":
+        await query.answer()
+        title = "SYNAPSE Video Pack"
+        description = "Оплата"
+        payload = "video_pack_2"
+        price = 150
+        prices = [LabeledPrice("Video Pack", price)]
+        keyboard_buttons = [
+            [InlineKeyboardButton(f"Заплатить ⭐️ {price}", pay=True)],
+            [InlineKeyboardButton("❌ Отменить", callback_data="premium:cancel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard_buttons)
+        try:
+            await context.bot.send_invoice(
+                chat_id=user_id,
+                title=title,
+                description=description,
+                payload=payload,
+                provider_token="",
+                currency="XTR",
+                prices=prices,
+                start_parameter="video-pack",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки инвойса: {e}")
+            await query.message.reply_text("❌ Произошла ошибка при генерации счета. Пожалуйста, попробуйте позже.")
+        return
+
+    if data == "video:generate:prompt":
+        balance = user_video_limits.get(user_id, 0)
+        if balance <= 0:
+            await query.answer("❌ У вас нет видео-генераций на балансе!", show_alert=True)
+            return
+        user_state[user_id] = "awaiting_video_prompt"
+        text = (
+            "🎬 <b>Режим генерации видео активирован.</b>\n\n"
+            "Отправьте описание (промпт) для видео следующим сообщением (без команд).\n\n"
+            "<i>Например: A majestic dragon flying over snow-covered mountains, cinematic 8k.</i>"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="action:video")]])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await query.answer()
+        return
+
     if data == "action:settings":
         user = query.from_user
         is_prem = is_premium_user(user)
@@ -2272,6 +2423,133 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if reply_text:
         add_message(user_id, "model", [{"text": reply_text}])
 
+async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
+    user_id = update.effective_user.id
+    balance = user_video_limits.get(user_id, 0)
+    if balance <= 0:
+        await update.message.reply_text("❌ У вас нет видео-генераций на балансе! Приобретите пакет видео в меню генерации видео.")
+        return
+
+    model = user_video_model.get(user_id, "google/veo-3.1-lite")
+    model_display = {
+        "x-ai/grok-imagine-video": "Grok Imagine",
+        "google/veo-3.1-lite": "Veo",
+        "kwaivgi/kling-v3.0-std": "Kling"
+    }.get(model, model)
+
+    status_msg = await update.message.reply_text(
+        f"🎬 <b>Запущена генерация видео...</b>\n"
+        f"🤖 Модель: <b>{model_display}</b>\n"
+        f"⏳ Это займет около 1-3 минут. Пожалуйста, подождите.",
+        parse_mode=ParseMode.HTML
+    )
+
+    # Уменьшаем баланс
+    user_video_limits[user_id] = balance - 1
+    _save_video_limits()
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "prompt": prompt
+    }
+
+    import aiohttp
+    import tempfile
+    import os
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://openrouter.ai/api/v1/videos", json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    resp_txt = await resp.text()
+                    raise ValueError(f"HTTP {resp.status}: {resp_txt}")
+                resp_data = await resp.json()
+                job_id = resp_data.get("id")
+                if not job_id:
+                    raise ValueError(resp_data.get("error", {}).get("message", "Не удалось запустить задачу генерации."))
+
+            # Поллинг статуса
+            poll_interval = 10
+            max_attempts = 30
+            video_url = None
+
+            for attempt in range(max_attempts):
+                await asyncio.sleep(poll_interval)
+                async with session.get(f"https://openrouter.ai/api/v1/videos/{job_id}", headers=headers) as status_resp:
+                    if status_resp.status == 200:
+                        job_data = await status_resp.json()
+                        status = job_data.get("status")
+                        if status == "completed":
+                            if "unsigned_urls" in job_data and job_data["unsigned_urls"]:
+                                video_url = job_data["unsigned_urls"][0]
+                            elif "output" in job_data and isinstance(job_data["output"], dict):
+                                video_url = job_data["output"].get("url")
+                            break
+                        elif status == "failed":
+                            err_msg = job_data.get("error", {}).get("message", "Задача завершилась с ошибкой.")
+                            raise ValueError(err_msg)
+                    else:
+                        logger.warning("Не удалось проверить статус %s: HTTP %d", job_id, status_resp.status)
+
+            if not video_url:
+                raise TimeoutError("Превышено время ожидания генерации видео (5 минут).")
+
+            await status_msg.edit_text("⏳ <b>Видео сгенерировано! Отправляю...</b>", parse_mode=ParseMode.HTML)
+
+            caption = (
+                f"🎥 <b>Видео готово!</b>\n\n"
+                f"📝 Промпт: <i>{prompt}</i>\n"
+                f"🤖 Модель: <b>{model_display}</b>\n\n"
+                f"💰 Остаток баланса: <b>{user_video_limits[user_id]} видео</b>"
+            )
+
+            try:
+                await context.bot.send_video(
+                    chat_id=update.effective_chat.id,
+                    video=video_url,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as send_err:
+                logger.info("Ошибка отправки видео по ссылке, пробуем скачать и отправить: %s", send_err)
+                async with session.get(video_url) as file_resp:
+                    if file_resp.status == 200:
+                        video_bytes = await file_resp.read()
+                        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                            tmp.write(video_bytes)
+                            tmp_path = tmp.name
+                        try:
+                            with open(tmp_path, "rb") as video_file:
+                                await context.bot.send_video(
+                                    chat_id=update.effective_chat.id,
+                                    video=video_file,
+                                    caption=caption,
+                                    parse_mode=ParseMode.HTML
+                                )
+                        finally:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                    else:
+                        raise send_err
+
+            await status_msg.delete()
+
+    except Exception as e:
+        logger.error("Ошибка при генерации видео: %s", e)
+        user_video_limits[user_id] = user_video_limits.get(user_id, 0) + 1
+        _save_video_limits()
+        await status_msg.edit_text(
+            f"❌ <b>Ошибка генерации видео:</b>\n{e}\n\n"
+            f"Баланс восстановлен. Текущий баланс: <b>{user_video_limits[user_id]} видео</b>.",
+            parse_mode=ParseMode.HTML
+        )
+
 # ---------------------------------------------------------------------------
 # Текстовые сообщения в обычном чате
 # ---------------------------------------------------------------------------
@@ -2442,6 +2720,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if update.effective_chat.type == "private":
             await delete_old_menu(update.effective_chat.id, context)
         await handle_image_logic(update, context, user_text)
+        if update.effective_chat.type == "private":
+            await send_new_menu(update.effective_chat.id, context, user_id)
+        return
+
+    elif state == "awaiting_video_prompt":
+        if update.effective_chat.type == "private":
+            await delete_old_menu(update.effective_chat.id, context)
+        await handle_video_logic(update, context, user_text)
         if update.effective_chat.type == "private":
             await send_new_menu(update.effective_chat.id, context, user_id)
         return
@@ -2927,17 +3213,29 @@ async def post_init(app) -> None:
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отвечает на запрос предварительной проверки платежа (PreCheckoutQuery)."""
     query = update.pre_checkout_query
-    if query.invoice_payload not in ["premium_1_month", "premium_3_months"]:
+    if query.invoice_payload not in ["premium_1_month", "premium_3_months", "video_pack_2"]:
         await query.answer(ok=False, error_message="Что-то пошло не так...")
     else:
         await query.answer(ok=True)
 
 async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает успешный платеж и начисляет премиум-подписку."""
+    """Обрабатывает успешный платеж и начисляет премиум-подписку или пакет видео."""
     payment = update.message.successful_payment
     payload = payment.invoice_payload
     user_id = update.effective_user.id
     
+    if payload == "video_pack_2":
+        current_bal = user_video_limits.get(user_id, 0)
+        user_video_limits[user_id] = current_bal + 2
+        _save_video_limits()
+        await update.message.reply_text(
+            f"🎉 <b>Спасибо за покупку!</b>\n\n"
+            f"Вам начислено <b>2 генерации видео</b>!\n"
+            f"Текущий баланс: <b>{user_video_limits[user_id]} видео</b>.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
     # Продлеваем или активируем подписку
     user_info = premium_users.setdefault(user_id, {})
     now = time.time()
