@@ -564,7 +564,7 @@ def get_premium_info_text(user, user_id: int, is_prem: bool, status_text: str) -
         f"📊 <b>Ваши доступные лимиты на неделю:</b>\n"
         f"{limit_text}\n\n"
         "✨ <b>Преимущества подписки Premium:</b>\n"
-        "1️⃣ <b>Доступ к умной модели Claude (Sonnet 3.5)</b>\n"
+        "1️⃣ <b>Доступ к умной модели Claude (Sonnet 5.0)</b>\n"
         "2️⃣ <b>Глубокое логическое мышление (/think)</b>\n"
         "3️⃣ <b>Генерация картинок сверхвысокого качества с моделью Gemini 3.1 Flash Image (/image)</b>\n"
         "4️⃣ <b>Планирование сообщений в бизнес-аккаунте (/schedule)</b>\n\n"
@@ -765,9 +765,9 @@ async def send_new_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE, user_i
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     text = (
-        f"Привет, {user.first_name}! 👋\n"
-        "Я умный ИИ-собеседник <b>SYNAPSE</b>.\n\n"
-        "Выберите модель или воспользуйтесь функциями ниже:"
+        f"👋 <b>Приветствуем вас, {user.first_name}!</b>\n\n"
+        "🤖 Я интеллектуальный ИИ-ассистент <b>SYNAPSE</b>, готовый помочь вам в любых задачах.\n\n"
+        "👉 <i>Выберите модель или воспользуйтесь функциями меню ниже:</i>"
     )
     await send_new_menu(update.effective_chat.id, context, user.id, text)
 
@@ -843,14 +843,14 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------------------------------------------------------------------------
 def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str) -> str:
     return (
-        "⚙️ <b>Настройки бота SYNAPSE</b>\n\n"
-        f"👑 Подписка: <b>{prem_status}</b>\n"
-        f"🗂 Режим чата: <b>{mode_label}</b>\n"
-        f"🔄 Авто-ответ в бизнес-чатах: <b>{auto_label}</b>\n"
-        f"📝 Лимит истории: <b>{max_h} сообщений</b>\n"
-        f"🎭 Личность авто-ответчика: <i>{persona_label}</i>\n\n"
-        "🤖 <b>SYNAPSE AGENT</b>: Вы можете запустить автономного агента, нажав на кнопку <b>Agent</b> рядом с полем ввода сообщения в этом чате.\n\n"
-        "Используйте /persona для настройки личности."
+        "⚙️ <b>НАСТРОЙКИ БОТА SYNAPSE</b>\n\n"
+        f"👑 <b>Подписка Premium:</b> {prem_status}\n"
+        f"🤖 <b>Активный режим ИИ:</b> <b>{mode_label}</b>\n"
+        f"🔄 <b>Автоответ в бизнес-чатах:</b> <b>{auto_label}</b>\n"
+        f"📝 <b>Лимит памяти диалога:</b> <b>{max_h} сообщений</b>\n"
+        f"🎭 <b>Роль автоответчика:</b> <i>{persona_label}</i>\n\n"
+        "ℹ️ <b>SYNAPSE AGENT:</b> Вы можете запустить автономного агента, нажав на кнопку <b>Agent</b> рядом с полем ввода сообщения в этом чате.\n\n"
+        "💡 <i>Используйте команду /persona для настройки уникальной роли автоответчика.</i>"
     )
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1014,7 +1014,7 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
         try:
             mode = user_mode.get(user_id, "default")
             if mode == "claude":
-                translation = await call_external_llm("openrouter", "anthropic/claude-3.5-sonnet", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
+                translation = await call_external_llm("openrouter", "anthropic/claude-sonnet-5", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
             else:
                 if os.environ.get("OPENROUTER_API_KEY"):
                     translation = await call_external_llm("openrouter", "google/gemini-2.5-flash-lite", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
@@ -1608,9 +1608,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         user_state.pop(user_id, None)
         user = query.from_user
         text = (
-            f"Привет, {user.first_name}! 👋\n"
-            "Я умный ИИ-собеседник <b>SYNAPSE</b>.\n\n"
-            "Выберите модель или воспользуйтесь функциями ниже:"
+            f"👋 <b>Приветствуем вас, {user.first_name}!</b>\n\n"
+            "🤖 Я интеллектуальный ИИ-ассистент <b>SYNAPSE</b>, готовый помочь вам в любых задачах.\n\n"
+            "👉 <i>Выберите модель или воспользуйтесь функциями меню ниже:</i>"
         )
         await query.edit_message_text(
             text,
@@ -1710,9 +1710,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("История очищена!")
         user = query.from_user
         text = (
-            f"Привет, {user.first_name}! 👋\n"
-            "Я умный ИИ-собеседник <b>SYNAPSE</b>.\n\n"
-            "Выберите модель или воспользуйтесь функциями ниже:"
+            f"👋 <b>Приветствуем вас, {user.first_name}!</b>\n\n"
+            "🤖 Я интеллектуальный ИИ-ассистент <b>SYNAPSE</b>, готовый помочь вам в любых задачах.\n\n"
+            "👉 <i>Выберите модель или воспользуйтесь функциями меню ниже:</i>"
         )
         await query.edit_message_text(
             text,
@@ -2150,7 +2150,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         mode = user_mode.get(user_id, "default")
         if mode == "claude":
             provider = "openrouter"
-            model = "anthropic/claude-3.5-sonnet"
+            model = "anthropic/claude-sonnet-5"
         else:
             if os.environ.get("OPENROUTER_API_KEY"):
                 provider = "openrouter"
@@ -2410,7 +2410,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Определяем провайдера и модель на основе выбранного режима
     if mode == "claude":
         provider = "openrouter"
-        model = "anthropic/claude-3.5-sonnet"
+        model = "anthropic/claude-sonnet-5"
     else:
         if os.environ.get("OPENROUTER_API_KEY"):
             provider = "openrouter"
@@ -2479,7 +2479,7 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if mode == "claude":
             answer_raw = await call_external_llm(
                 provider="openrouter",
-                model="anthropic/claude-3.5-sonnet",
+                model="anthropic/claude-sonnet-5",
                 history=[{"role": "user", "parts": [{"text": user_text}]}],
                 system_instruction=SYSTEM_PROMPT_DEFAULT,
                 stream=False,
