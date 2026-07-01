@@ -984,10 +984,11 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     channel_label = channel if channel else "не задан"
 
     mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
-    auto_label = "✅ Вкл" if auto else "❌ Выкл"
+    is_prem = is_premium_user(user)
+    auto_active = auto if is_prem else False
+    auto_label = "✅ Вкл" if auto_active else "❌ Выкл"
     persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-    is_prem = is_premium_user(user)
     prem_status = "Активна 👑" if is_prem else "Не активна ❌"
 
     text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
@@ -1003,7 +1004,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ],
         [
             InlineKeyboardButton(
-                f"🔄 Авто-ответ: {'✅' if auto else '❌'}",
+                f"🔄 Авто-ответ: {'✅' if auto_active else '❌'}",
                 callback_data="settings:auto_reply:toggle",
             ),
             InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
@@ -2040,8 +2041,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         channel = settings.get("publish_channel", "")
         channel_label = channel if channel else "не задан"
 
+        auto_active = auto if is_prem else False
+
         mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
-        auto_label = "✅ Вкл" if auto else "❌ Выкл"
+        auto_label = "✅ Вкл" if auto_active else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
         text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
@@ -2052,7 +2055,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
             ],
             [
-                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto_active else '❌'}", callback_data="settings:auto_reply:toggle"),
                 InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
             ],
             [
@@ -2156,11 +2159,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
+        channel = settings.get("publish_channel", "")
+        channel_label = channel if channel else "не задан"
+
+        auto_active = auto if is_prem else False
+
         mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
-        auto_label = "✅ Вкл" if auto else "❌ Выкл"
+        auto_label = "✅ Вкл" if auto_active else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -2168,7 +2176,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
             ],
             [
-                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto_active else '❌'}", callback_data="settings:auto_reply:toggle"),
+                InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
             ],
             [
                 InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
@@ -2211,12 +2220,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auto = settings.get("auto_reply", True)
         max_h = settings.get("max_history", 10)
         persona = settings.get("persona", "")
-        agent_token = settings.get("agent_token")
-        mode_label = {"default": "Gemini (Бесплатно)", "claude": "Claude"}.get(mode, mode)
-        auto_label = "✅ Вкл" if auto else "❌ Выкл"
+        channel = settings.get("publish_channel", "")
+        channel_label = channel if channel else "не задан"
+
+        auto_active = auto if is_prem else False
+
+        mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
+        auto_label = "✅ Вкл" if auto_active else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, agent_token)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -2224,7 +2237,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
             ],
             [
-                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto_active else '❌'}", callback_data="settings:auto_reply:toggle"),
+                InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
             ],
             [
                 InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
@@ -3147,8 +3161,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         persona = settings.get("persona", "")
         channel_label = channel_input
 
+        auto_active = auto if is_prem else False
+
         mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
-        auto_label = "✅ Вкл" if auto else "❌ Выкл"
+        auto_label = "✅ Вкл" if auto_active else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
         text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
@@ -3158,7 +3174,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 InlineKeyboardButton("📅 Отложенные сообщения", callback_data="settings:scheduler:menu"),
             ],
             [
-                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto else '❌'}", callback_data="settings:auto_reply:toggle"),
+                InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto_active else '❌'}", callback_data="settings:auto_reply:toggle"),
                 InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
             ],
             [
