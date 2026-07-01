@@ -1557,17 +1557,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         months = int(data.split(":")[-1])
         if months == 1:
-            title = "SYNAPSE Premium (1 месяц)"
-            description = "Доступ к Claude, Глубокому мышлению и планированию сообщений на 1 месяц."
+            title = "SYNAPSE Premium"
+            description = "Подписка на 1 месяц"
             payload = "premium_1_month"
             price = 299
         else:
-            title = "SYNAPSE Premium (3 месяца)"
-            description = "Доступ к Claude, Глубокому мышлению и планированию сообщений на 3 месяца."
+            title = "SYNAPSE Premium"
+            description = "Подписка на 3 месяца"
             payload = "premium_3_months"
             price = 799
 
         prices = [LabeledPrice("Premium", price)]
+        keyboard_buttons = [
+            [InlineKeyboardButton(f"Заплатить ⭐️ {price}", pay=True)],
+            [InlineKeyboardButton("❌ Отменить", callback_data="premium:cancel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard_buttons)
         try:
             await context.bot.send_invoice(
                 chat_id=user_id,
@@ -1577,11 +1582,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 provider_token="",
                 currency="XTR",
                 prices=prices,
-                start_parameter="premium-subscription"
+                start_parameter="premium-subscription",
+                reply_markup=reply_markup
             )
         except Exception as e:
             logger.error(f"Ошибка отправки инвойса: {e}")
             await query.message.reply_text("❌ Произошла ошибка при генерации счета. Пожалуйста, попробуйте позже.")
+        return
+
+    if data == "premium:cancel":
+        await query.message.delete()
+        await query.answer("Оплата отменена.")
         return
 
     if data.startswith("premium:activate"):
