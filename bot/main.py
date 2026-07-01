@@ -1062,9 +1062,13 @@ async def handle_think_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = " ".join(context.args).strip()
+    user = update.effective_user
+    user_id = user.id
     if not query:
+        user_state[user_id] = "awaiting_think"
         await update.message.reply_text(
-            "✏️ Напишите вопрос после команды. Пример:\n<code>/think какая скорость света?</code>",
+            "🧠 <b>Режим глубокого мышления активирован.</b>\n\n"
+            "Отправьте ваш вопрос следующим сообщением (без команды /think).",
             parse_mode=ParseMode.HTML
         )
         return
@@ -1220,8 +1224,15 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = " ".join(context.args).strip()
+    user = update.effective_user
+    user_id = user.id
     if not prompt:
-        await update.message.reply_text("✏️ Напишите описание картинки.", parse_mode=ParseMode.HTML)
+        user_state[user_id] = "awaiting_image"
+        await update.message.reply_text(
+            "✏️ <b>Режим генерации изображений активирован.</b>\n\n"
+            "Напишите описание картинки следующим сообщением (без команды /image).",
+            parse_mode=ParseMode.HTML
+        )
         return
 
     user = update.effective_user
@@ -2298,16 +2309,45 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_id = user.id
-    mode = user_mode.get(user_id, "default")
-    if mode == "claude":
-        allowed, reason = check_and_record_limit(user, "claude", 150)
+    
+    state = user_state.pop(user_id, None)
+    
+    if state == "awaiting_image":
+        allowed, reason = check_and_record_limit(user, "image", 10)
         if not allowed:
             if reason == "need_premium":
-                await update.message.reply_text("❌ Режим Claude доступен только по Premium подписке! Переключаю вас на Gemini.")
+                status_text = "❌ <b>Не активна</b>"
+                text = get_premium_info_text(user, user.id, False, status_text)
+                keyboard_buttons = [
+                    [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+                    [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+                    [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")]
+                ]
+                keyboard = InlineKeyboardMarkup(keyboard_buttons)
+                await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             elif reason == "limit_exceeded":
-                await update.message.reply_text("❌ Вы исчерпали лимит 150 премиум-запросов к Claude в неделю! Переключаю вас на Gemini.")
-            set_user_mode(user_id, "default")
-            mode = "default"
+                await update.message.reply_text("❌ Вы исчерпали лимит 10 изображений в неделю!")
+            if update.effective_chat.type == "private":
+                await send_new_menu(update.effective_chat.id, context, user_id)
+            return
+    elif state == "awaiting_video_prompt":
+        balance = user_video_limits.get(user_id, 0)
+        if balance <= 0:
+            await update.message.reply_text("❌ У вас нет видео-генераций на балансе! Приобретите пакет видео в меню генерации видео.")
+            if update.effective_chat.type == "private":
+                await send_new_menu(update.effective_chat.id, context, user_id)
+            return
+    else:
+        mode = user_mode.get(user_id, "default")
+        if mode == "claude":
+            allowed, reason = check_and_record_limit(user, "claude", 150)
+            if not allowed:
+                if reason == "need_premium":
+                    await update.message.reply_text("❌ Режим Claude доступен только по Premium подписке! Переключаю вас на Gemini.")
+                elif reason == "limit_exceeded":
+                    await update.message.reply_text("❌ Вы исчерпали лимит 150 премиум-запросов к Claude в неделю! Переключаю вас на Gemini.")
+                set_user_mode(user_id, "default")
+                mode = "default"
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
@@ -2368,6 +2408,78 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             }
         }
         text_part = {"text": user_prompt}
+
+        if state == "awaiting_image":
+            status_msg = await update.message.reply_text("⏳ <b>Анализирую изображение для генерации...</b>", parse_mode=ParseMode.HTML)
+            desc_prompt = "Describe this image in detail in English for a text-to-image generator prompt. Output ONLY the description."
+            try:
+                desc = await call_external_llm(
+                    provider="openrouter",
+                    model="google/gemini-2.5-flash",
+                    history=[{"role": "user", "parts": [photo_part, {"text": desc_prompt}]}],
+                    stream=False,
+                    max_tokens=500
+                )
+            except Exception as e:
+                logger.warning("Не удалось описать картинку через OpenRouter, пробуем через Gemini API: %s", e)
+                try:
+                    response = gemini_generate([photo_part, {"text": desc_prompt}], types.GenerateContentConfig(max_output_tokens=500))
+                    desc = response.text
+                except Exception:
+                    desc = "A beautiful photo matching user style"
+            
+            caption = update.message.caption or ""
+            if caption:
+                combined_prompt = f"Create an image based on this description: {desc}. Modified: {caption}"
+            else:
+                combined_prompt = desc
+                
+            await status_msg.delete()
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+                
+            await handle_image_logic(update, context, combined_prompt)
+            if update.effective_chat.type == "private":
+                await send_new_menu(update.effective_chat.id, context, user_id)
+            return
+
+        elif state == "awaiting_video_prompt":
+            status_msg = await update.message.reply_text("⏳ <b>Анализирую изображение для видео...</b>", parse_mode=ParseMode.HTML)
+            desc_prompt = "Describe this image in detail in English for a video generator prompt. Output ONLY the description."
+            try:
+                desc = await call_external_llm(
+                    provider="openrouter",
+                    model="google/gemini-2.5-flash",
+                    history=[{"role": "user", "parts": [photo_part, {"text": desc_prompt}]}],
+                    stream=False,
+                    max_tokens=500
+                )
+            except Exception as e:
+                logger.warning("Не удалось описать картинку для видео: %s", e)
+                try:
+                    response = gemini_generate([photo_part, {"text": desc_prompt}], types.GenerateContentConfig(max_output_tokens=500))
+                    desc = response.text
+                except Exception:
+                    desc = "A beautiful video matching user style"
+            
+            caption = update.message.caption or ""
+            if caption:
+                combined_prompt = f"Create a video based on this description: {desc}. Modified: {caption}"
+            else:
+                combined_prompt = desc
+                
+            await status_msg.delete()
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+                
+            await handle_video_logic(update, context, combined_prompt)
+            if update.effective_chat.type == "private":
+                await send_new_menu(update.effective_chat.id, context, user_id)
+            return
         
         # Объединяем с историей сообщений пользователя
         history = get_history(user_id)
