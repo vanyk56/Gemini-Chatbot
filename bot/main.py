@@ -1143,7 +1143,15 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     allowed, reason = check_and_record_limit(user, "image", 10)
     if not allowed:
         if reason == "need_premium":
-            await update.message.reply_text("❌ Генерация изображений доступна только по Premium подписке! Оформите её с помощью /premium.")
+            status_text = "❌ <b>Не активна</b>"
+            text = get_premium_info_text(user, user.id, False, status_text)
+            keyboard_buttons = [
+                [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+                [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+                [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")]
+            ]
+            keyboard = InlineKeyboardMarkup(keyboard_buttons)
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif reason == "limit_exceeded":
             await update.message.reply_text("❌ Вы исчерпали лимит 10 изображений в неделю!")
         return
