@@ -44,6 +44,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
     InputTextMessageContent,
+    LabeledPrice,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -55,6 +56,7 @@ from telegram.ext import (
     InlineQueryHandler,
     ContextTypes,
     filters,
+    PreCheckoutQueryHandler,
 )
 
 # ---------------------------------------------------------------------------
@@ -474,7 +476,15 @@ def is_premium_user(user) -> bool:
     if user.username and user.username.lower() == "ohakol":
         return True
     user_info = premium_users.get(user.id, {})
-    return user_info.get("is_premium", False)
+    if user_info.get("is_premium", False):
+        premium_until = user_info.get("premium_until")
+        if premium_until is not None:
+            if time.time() > premium_until:
+                user_info["is_premium"] = False
+                _save_premium_users()
+                return False
+        return True
+    return False
 
 def check_and_record_premium_request(user) -> tuple[bool, str]:
     """
@@ -487,10 +497,10 @@ def check_and_record_premium_request(user) -> tuple[bool, str]:
     if user.username and user.username.lower() == "ohakol":
         return True, "owner"
     
-    user_info = premium_users.get(user.id, {})
-    if not user_info.get("is_premium", False):
+    if not is_premium_user(user):
         return False, "need_premium"
     
+    user_info = premium_users.get(user.id, {})
     # Скользящее окно: 7 дней (168 часов)
     now = time.time()
     requests = user_info.setdefault("requests", [])
@@ -1104,13 +1114,21 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Проверяем текущий статус подписки
     is_prem = is_premium_user(user)
-    status_text = "👑 <b>Активна</b>" if is_prem else "❌ <b>Не активна</b>"
+    user_info = premium_users.get(user_id, {})
+    if is_prem:
+        premium_until = user_info.get("premium_until")
+        if premium_until:
+            until_dt = datetime.fromtimestamp(premium_until, tz=tz_msk).strftime("%d.%m.%Y %H:%M")
+            status_text = f"👑 <b>Активна (до {until_dt} МСК)</b>"
+        else:
+            status_text = "👑 <b>Активна (Бессрочно)</b>"
+    else:
+        status_text = "❌ <b>Не активна</b>"
     
     # Считаем количество оставшихся запросов на этой неделе
     if user.username and user.username.lower() == "ohakol":
         limit_text = "Бесконечно запросов (Владелец)"
     elif is_prem:
-        user_info = premium_users.get(user_id, {})
         now = time.time()
         requests = user_info.get("requests", [])
         filtered_requests = [r for r in requests if now - r < 7 * 24 * 3600]
@@ -1129,10 +1147,11 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "Лимит для обычных премиум-пользователей составляет <b>5 запросов в неделю</b>."
     )
 
-    keyboard_buttons = []
-    if not is_prem:
-        keyboard_buttons.append([InlineKeyboardButton("👑 Активировать демо-подписку", callback_data="premium:activate")])
-    keyboard_buttons.append([InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")])
+    keyboard_buttons = [
+        [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+        [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+        [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")]
+    ]
     keyboard = InlineKeyboardMarkup(keyboard_buttons)
 
     if update.effective_chat.type == "private":
@@ -1450,6 +1469,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         return
 
+    if data.startswith("premium:buy:"):
+        await query.answer()
+        months = int(data.split(":")[-1])
+        if months == 1:
+            title = "SYNAPSE Premium (1 месяц)"
+            description = "Доступ к Claude Opus, Глубокому мышлению и планированию сообщений на 1 месяц."
+            payload = "premium_1_month"
+            price = 299
+        else:
+            title = "SYNAPSE Premium (3 месяца)"
+            description = "Доступ к Claude Opus, Глубокому мышлению и планированию сообщений на 3 месяца."
+            payload = "premium_3_months"
+            price = 799
+
+        prices = [LabeledPrice("Premium", price)]
+        try:
+            await context.bot.send_invoice(
+                chat_id=user_id,
+                title=title,
+                description=description,
+                payload=payload,
+                provider_token="",
+                currency="XTR",
+                prices=prices,
+                start_parameter="premium-subscription"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки инвойса: {e}")
+            await query.message.reply_text("❌ Произошла ошибка при генерации счета. Пожалуйста, попробуйте позже.")
+        return
+
     if data.startswith("premium:activate"):
         user_info = premium_users.setdefault(user_id, {})
         user_info["is_premium"] = True
@@ -1486,11 +1536,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "action:premium":
         user = query.from_user
         is_prem = is_premium_user(user)
-        status_text = "👑 <b>Активна</b>" if is_prem else "❌ <b>Не активна</b>"
+        user_info = premium_users.get(user_id, {})
+        if is_prem:
+            premium_until = user_info.get("premium_until")
+            if premium_until:
+                until_dt = datetime.fromtimestamp(premium_until, tz=tz_msk).strftime("%d.%m.%Y %H:%M")
+                status_text = f"👑 <b>Активна (до {until_dt} МСК)</b>"
+            else:
+                status_text = "👑 <b>Активна (Бессрочно)</b>"
+        else:
+            status_text = "❌ <b>Не активна</b>"
+
         if user.username and user.username.lower() == "ohakol":
             limit_text = "Бесконечно запросов (Владелец)"
         elif is_prem:
-            user_info = premium_users.get(user_id, {})
             now = time.time()
             requests = user_info.get("requests", [])
             filtered_requests = [r for r in requests if now - r < 7 * 24 * 3600]
@@ -1509,10 +1568,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Лимит для обычных премиум-пользователей составляет <b>5 запросов в неделю</b>."
         )
 
-        keyboard_buttons = []
-        if not is_prem:
-            keyboard_buttons.append([InlineKeyboardButton("👑 Активировать демо-подписку", callback_data="premium:activate:settings")])
-        keyboard_buttons.append([InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")])
+        keyboard_buttons = [
+            [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+            [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+            [InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")]
+        ]
         keyboard = InlineKeyboardMarkup(keyboard_buttons)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         await query.answer()
@@ -2730,11 +2790,60 @@ async def post_init(app) -> None:
         logger.info("Восстановлено отложенных сообщений: %d", restored_count)
 
 
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отвечает на запрос предварительной проверки платежа (PreCheckoutQuery)."""
+    query = update.pre_checkout_query
+    if query.invoice_payload not in ["premium_1_month", "premium_3_months"]:
+        await query.answer(ok=False, error_message="Что-то пошло не так...")
+    else:
+        await query.answer(ok=True)
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает успешный платеж и начисляет премиум-подписку."""
+    payment = update.message.successful_payment
+    payload = payment.invoice_payload
+    user_id = update.effective_user.id
+    
+    # Продлеваем или активируем подписку
+    user_info = premium_users.setdefault(user_id, {})
+    now = time.time()
+    current_until = user_info.get("premium_until")
+    start_time = current_until if (current_until and current_until > now) else now
+    
+    if payload == "premium_1_month":
+        duration = 30 * 24 * 3600
+        months_text = "1 месяц"
+    elif payload == "premium_3_months":
+        duration = 90 * 24 * 3600
+        months_text = "3 месяца"
+    else:
+        logger.warning(f"Неизвестный payload платежа: {payload}")
+        return
+
+    user_info["is_premium"] = True
+    user_info["premium_until"] = start_time + duration
+    user_info["requests"] = []
+    _save_premium_users()
+    
+    until_dt = datetime.fromtimestamp(user_info["premium_until"], tz=tz_msk).strftime("%d.%m.%Y %H:%M")
+    
+    await update.message.reply_text(
+        f"🎉 <b>Спасибо за покупку!</b>\n\n"
+        f"Ваша Premium-подписка на {months_text} успешно активирована!\n"
+        f"Действует до: <b>{until_dt}</b> (МСК)",
+        parse_mode=ParseMode.HTML
+    )
+
+
 def main() -> None:
     logger.info("Запуск Telegram-бота...")
     _load_state()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+
+    # Платежи
+    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
 
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("reset",    cmd_reset))
