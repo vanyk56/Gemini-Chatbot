@@ -1981,6 +1981,52 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("❌ <b>Публикация отменена.</b>", parse_mode=ParseMode.HTML)
         return
 
+    if data.startswith("post:edit:"):
+        await query.answer()
+        draft_id = data.split(":")[-1]
+        post_text = post_drafts.get(draft_id)
+        if not post_text:
+            await query.edit_message_text("❌ Черновик поста не найден.", parse_mode=ParseMode.HTML)
+            return
+            
+        user_state[user_id] = f"awaiting_post_edit:{draft_id}"
+        
+        import html
+        escaped_text = html.escape(post_text)
+        
+        text = (
+            "📝 <b>Редактирование поста</b>\n\n"
+            "Нажмите на блок ниже, чтобы скопировать текущий текст, внесите изменения и отправьте измененный текст следующим сообщением:\n\n"
+            f"<code>{escaped_text}</code>"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к посту", callback_data=f"post:show:{draft_id}")]])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
+
+    if data.startswith("post:show:"):
+        await query.answer()
+        draft_id = data.split(":")[-1]
+        post_text = post_drafts.get(draft_id)
+        if not post_text:
+            await query.edit_message_text("❌ Черновик поста не найден.", parse_mode=ParseMode.HTML)
+            return
+            
+        user_state.pop(user_id, None)
+        
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📢 Опубликовать", callback_data=f"post:publish:{draft_id}"),
+                InlineKeyboardButton("✏️ Редактировать", callback_data=f"post:edit:{draft_id}"),
+                InlineKeyboardButton("❌ Отменить", callback_data=f"post:cancel:{draft_id}")
+            ]
+        ])
+        
+        try:
+            await query.edit_message_text(md_to_html(post_text), parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        except Exception:
+            await query.edit_message_text(post_text, reply_markup=keyboard)
+        return
+
     if data == "action:settings":
         user = query.from_user
         is_prem = is_premium_user(user)
@@ -2909,6 +2955,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"⚠️ Произошла ошибка во время настройки: {err}\nСостояние сброшено, попробуйте еще раз.")
             return
 
+    if state and state.startswith("awaiting_post_edit:"):
+        draft_id = state.split(":")[-1]
+        post_drafts[draft_id] = user_text
+        _save_post_drafts()
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📢 Опубликовать", callback_data=f"post:publish:{draft_id}"),
+                InlineKeyboardButton("✏️ Редактировать", callback_data=f"post:edit:{draft_id}"),
+                InlineKeyboardButton("❌ Отменить", callback_data=f"post:cancel:{draft_id}")
+            ]
+        ])
+
+        if update.effective_chat.type == "private":
+            await delete_old_menu(update.effective_chat.id, context)
+
+        try:
+            msg = await update.message.reply_text(md_to_html(user_text), parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        except Exception:
+            msg = await update.message.reply_text(user_text, reply_markup=keyboard)
+
+        if update.effective_chat.type == "private":
+            user_menu_msg[update.effective_chat.id] = msg.message_id
+        return
+
     if state == "awaiting_publish_channel":
         channel_input = user_text.strip()
         if not channel_input.startswith("@") and not channel_input.startswith("-100"):
@@ -3071,6 +3142,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("📢 Опубликовать", callback_data=f"post:publish:{draft_id}"),
+                InlineKeyboardButton("✏️ Редактировать", callback_data=f"post:edit:{draft_id}"),
                 InlineKeyboardButton("❌ Отменить", callback_data=f"post:cancel:{draft_id}")
             ]
         ])
