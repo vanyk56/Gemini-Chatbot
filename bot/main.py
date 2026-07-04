@@ -2870,8 +2870,16 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
         user_video_limits[user_id] = balance - 1
         _save_video_limits()
 
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if not openrouter_key:
+        await status_msg.edit_text("❌ Ошибка: В настройках сервера не задан OPENROUTER_API_KEY.")
+        if not is_owner:
+            user_video_limits[user_id] = balance
+            _save_video_limits()
+        return
+
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {openrouter_key}",
         "Content-Type": "application/json"
     }
     payload = {
@@ -3426,19 +3434,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             _save_post_drafts()
 
         # Проверяем предложения генерации изображений или видео
-        stripped_reply = reply_text.strip()
-        if stripped_reply.startswith("/image ") or stripped_reply.startswith("/image\n"):
-            prompt = stripped_reply[len("/image"):].strip()
-            context.user_data["suggested_image_prompt"] = prompt
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🎨 Сгенерировать картинку", callback_data="suggest:generate:image")
-            ]])
-            try:
-                await sent_msg.edit_reply_markup(reply_markup=keyboard)
-            except Exception as e:
-                logger.warning("Failed to edit reply markup for image suggestion: %s", e)
-        elif stripped_reply.startswith("/video ") or stripped_reply.startswith("/video\n"):
-            prompt = stripped_reply[len("/video"):].strip()
+        if "/video" in reply_text:
+            idx = reply_text.find("/video")
+            prompt = reply_text[idx + len("/video"):].strip()
+            prompt = prompt.strip("` \n\r")
+            
             context.user_data["suggested_video_prompt"] = prompt
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🎥 Сгенерировать видео", callback_data="suggest:generate:video")
@@ -3447,6 +3447,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 await sent_msg.edit_reply_markup(reply_markup=keyboard)
             except Exception as e:
                 logger.warning("Failed to edit reply markup for video suggestion: %s", e)
+        elif "/image" in reply_text:
+            idx = reply_text.find("/image")
+            prompt = reply_text[idx + len("/image"):].strip()
+            prompt = prompt.strip("` \n\r")
+            
+            context.user_data["suggested_image_prompt"] = prompt
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎨 Сгенерировать картинку", callback_data="suggest:generate:image")
+            ]])
+            try:
+                await sent_msg.edit_reply_markup(reply_markup=keyboard)
+            except Exception as e:
+                logger.warning("Failed to edit reply markup for image suggestion: %s", e)
 
 # ---------------------------------------------------------------------------
 # Инлайн-режим
