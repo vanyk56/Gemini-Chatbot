@@ -2888,8 +2888,6 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
     }
 
     import aiohttp
-    import tempfile
-    import os
 
     try:
         async with aiohttp.ClientSession() as session:
