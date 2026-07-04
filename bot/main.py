@@ -359,7 +359,7 @@ async def native_stream_reply(
     *,
     reply_to_message_id: int | None = None,
     reply_markup=None,
-) -> str:
+) -> tuple:
     chat_id  = update.effective_chat.id
     draft_id = _next_draft_id()
 
@@ -401,6 +401,7 @@ async def native_stream_reply(
             await _send_draft(token, chat_id, draft_id, latex_to_text(accumulated))
             last_update = now
 
+    sent_msg = None
     if accumulated:
         final_html = md_to_html(accumulated)
         parts = split_message(final_html)
@@ -411,13 +412,13 @@ async def native_stream_reply(
             if reply_markup and i == len(parts) - 1:
                 kwargs["reply_markup"] = reply_markup
             try:
-                await update.message.reply_text(part, **kwargs)
+                sent_msg = await update.message.reply_text(part, **kwargs)
             except Exception:
                 if "parse_mode" in kwargs:
                     kwargs.pop("parse_mode")
-                await update.message.reply_text(part, **kwargs)
+                sent_msg = await update.message.reply_text(part, **kwargs)
 
-    return accumulated
+    return accumulated, sent_msg
 
 # ---------------------------------------------------------------------------
 # Состояние пользователей (история + режим + настройки)
@@ -744,7 +745,9 @@ SYSTEM_PROMPT_DEFAULT = (
     "Отвечай кратко и по делу, экономно расходуй слова и избегай лишней «воды». Используй эмодзи умеренно. "
     "Пиши на том же языке, на котором пишет пользователь. "
     "Если пользователь просит тебя сгенерировать, нарисовать или создать изображение/картинку/фото, "
-    "подскажи ему использовать специальную команду /image (или /generate), написав описание картинки после неё. " + _NO_LATEX
+    "подскажи ему использовать специальную команду /image (или /generate), написав описание картинки после неё. "
+    "Если пользователь просит сгенерировать видео или анимацию, "
+    "подскажи использовать команду /video, написав описание видео после неё. " + _NO_LATEX
 )
 
 SYSTEM_PROMPT_IMAGE = (
@@ -842,7 +845,8 @@ async def show_video_menu(query, context, user_id: int) -> None:
         "🎥 <b>ГЕНЕРАЦИЯ ВИДЕО (AI VIDEO)</b>\n\n"
         f"💰 <b>Ваш баланс:</b> {balance_display}\n"
         f"🤖 <b>Активная модель:</b> <b>{model_clean_name}</b>\n\n"
-        "Для создания видео выберите одну из моделей выше, а затем нажмите <b>🎬 Создать видео</b>, чтобы отправить текстовый промпт.\n\n"
+        "Для создания видео выберите одну из моделей выше, а затем нажмите <b>🎬 Создать видео</b>, чтобы отправить текстовый промпт.\n"
+        "Или отправьте команду <code>/video описание видео</code> напрямую.\n\n"
         "💡 <i>Если у вас закончились генерации, выберите пакет для покупки за звёзды.</i>"
     )
     
@@ -1134,6 +1138,7 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # Генерация картинок: /image
 # ---------------------------------------------------------------------------
 async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
+    msg = update.effective_message
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
@@ -1240,19 +1245,19 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     tmp_path = tmp.name
         except Exception as exc2:
             logger.error("Ошибка Pollinations AI: %s", exc2)
-            await update.message.reply_text("⚠️ Не удалось сгенерировать изображение.")
+            await msg.reply_text("⚠️ Не удалось сгенерировать изображение.")
             return
 
     try:
         with open(tmp_path, "rb") as f:
-            await update.message.reply_photo(
+            await msg.reply_photo(
                 photo=f,
                 caption=f"🎨 <b>Запрос:</b> {prompt}\n🇬🇧 <b>Промпт:</b> {english_prompt}",
                 parse_mode=ParseMode.HTML
             )
     except Exception as e:
         logger.error("Ошибка отправки фото: %s", e)
-        await update.message.reply_text("⚠️ Ошибка при отправке изображения.")
+        await msg.reply_text("⚠️ Ошибка при отправке изображения.")
     finally:
         if tmp_path:
             try:
@@ -1291,6 +1296,32 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await handle_image_logic(update, context, prompt)
+
+# ---------------------------------------------------------------------------
+# Генерация видео: /video
+# ---------------------------------------------------------------------------
+async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    prompt = " ".join(context.args).strip()
+    user = update.effective_user
+    user_id = user.id
+    if not prompt:
+        user_state[user_id] = "awaiting_video_prompt"
+        text = (
+            "🎬 <b>Режим генерации видео активирован.</b>\n\n"
+            "Отправьте описание (промпт) для видео следующим сообщением (без команд).\n\n"
+            "<i>Например: A majestic dragon flying over snow-covered mountains, cinematic 8k.</i>"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад в меню", callback_data="action:video")]])
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
+
+    balance = user_video_limits.get(user_id, 0)
+    is_owner = bool(user.username and user.username.lower() == "ohakol")
+    if balance <= 0 and not is_owner:
+        await update.message.reply_text("❌ У вас нет видео-генераций на балансе! Приобретите пакет видео в меню генерации видео.")
+        return
+
+    await handle_video_logic(update, context, prompt)
 
 # ---------------------------------------------------------------------------
 # Интеграция с Telegram Business: включение/выключение чатов
@@ -1549,6 +1580,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
+
+    if data == "suggest:generate:image":
+        await query.answer()
+        prompt = context.user_data.get("suggested_image_prompt")
+        if not prompt:
+            await query.message.reply_text("❌ Промпт не найден или устарел.")
+            return
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        
+        user = query.from_user
+        allowed, reason = check_and_record_limit(user, "image", 10)
+        if not allowed:
+            if reason == "need_premium":
+                status_text = "❌ <b>Не активна</b>"
+                text = get_premium_info_text(user, user.id, False, status_text)
+                keyboard_buttons = [
+                    [InlineKeyboardButton("⭐️ Купить Premium на 1 месяц — 299 ⭐️", callback_data="premium:buy:1")],
+                    [InlineKeyboardButton("⭐️ Купить Premium на 3 месяца — 799 ⭐️", callback_data="premium:buy:3")],
+                    [InlineKeyboardButton("❌ Закрыть", callback_data="menu:close")]
+                ]
+                keyboard = InlineKeyboardMarkup(keyboard_buttons)
+                await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            elif reason == "limit_exceeded":
+                await query.message.reply_text("❌ Вы исчерпали лимит 10 изображений в неделю!")
+            return
+            
+        await handle_image_logic(update, context, prompt)
+        return
+
+    if data == "suggest:generate:video":
+        await query.answer()
+        prompt = context.user_data.get("suggested_video_prompt")
+        if not prompt:
+            await query.message.reply_text("❌ Промпт не найден или устарел.")
+            return
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        
+        user = query.from_user
+        user_id = user.id
+        balance = user_video_limits.get(user_id, 0)
+        is_owner = bool(user.username and user.username.lower() == "ohakol")
+        if balance <= 0 and not is_owner:
+            await query.message.reply_text("❌ У вас нет видео-генераций на балансе! Приобретите пакет видео в меню генерации видео.")
+            return
+            
+        await handle_video_logic(update, context, prompt)
+        return
 
     if data == "settings:scheduler:menu":
         user_state.pop(user_id, None)
@@ -2759,11 +2843,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await status_msg.edit_text("⚠️ Произошла ошибка при расшифровке вашего голосового сообщения. Попробуйте ещё раз.")
 
 async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
+    msg = update.effective_message
     user_id = update.effective_user.id
     is_owner = bool(update.effective_user.username and update.effective_user.username.lower() == "ohakol")
     balance = user_video_limits.get(user_id, 0)
     if balance <= 0 and not is_owner:
-        await update.message.reply_text("❌ У вас нет видео-генераций на балансе! Приобретите пакет видео в меню генерации видео.")
+        await msg.reply_text("❌ У вас нет видео-генераций на балансе! Приобретите пакет видео в меню генерации видео.")
         return
 
     model = user_video_model.get(user_id, "google/veo-3.1-lite")
@@ -2773,7 +2858,7 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "kwaivgi/kling-v3.0-std": "Kling"
     }.get(model, model)
 
-    status_msg = await update.message.reply_text(
+    status_msg = await msg.reply_text(
         f"🎬 <b>Запущена генерация видео...</b>\n"
         f"🤖 Модель: <b>{model_display}</b>\n"
         f"⏳ Это займет около 1-3 минут. Пожалуйста, подождите.",
@@ -3109,14 +3194,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                     stream=True,
                     max_tokens=8192
                 )
-                reply_text = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
+                reply_text, _ = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
             else:
                 stream_config = types.GenerateContentConfig(
                     system_instruction=edit_system_prompt,
                     max_output_tokens=8192,
                 )
                 stream_iter = gemini_stream(contents=[{"role": "user", "parts": [{"text": "Пожалуйста, отредактируй пост по инструкции."}]}], config=stream_config)
-                reply_text = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
+                reply_text, _ = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
                 
             if reply_text:
                 post_drafts[draft_id] = reply_text
@@ -3319,14 +3404,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 stream=True,
                 max_tokens=8192
             )
-            reply_text = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
+            reply_text, sent_msg = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
         else:
             stream_config = types.GenerateContentConfig(
                 system_instruction=system_inst,
                 max_output_tokens=8192,
             )
             stream_iter = gemini_stream(contents=history, config=stream_config)
-            reply_text = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
+            reply_text, sent_msg = await native_stream_reply(update, context.bot.token, stream_iter, reply_markup=keyboard)
             
     except Exception as exc:
         logger.error("Ошибка API (%s / %s): %s", provider, model, exc)
@@ -3339,6 +3424,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         if is_post_request and draft_id:
             post_drafts[draft_id] = reply_text
             _save_post_drafts()
+
+        # Проверяем предложения генерации изображений или видео
+        stripped_reply = reply_text.strip()
+        if stripped_reply.startswith("/image ") or stripped_reply.startswith("/image\n"):
+            prompt = stripped_reply[len("/image"):].strip()
+            context.user_data["suggested_image_prompt"] = prompt
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎨 Сгенерировать картинку", callback_data="suggest:generate:image")
+            ]])
+            try:
+                await sent_msg.edit_reply_markup(reply_markup=keyboard)
+            except Exception as e:
+                logger.warning("Failed to edit reply markup for image suggestion: %s", e)
+        elif stripped_reply.startswith("/video ") or stripped_reply.startswith("/video\n"):
+            prompt = stripped_reply[len("/video"):].strip()
+            context.user_data["suggested_video_prompt"] = prompt
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎥 Сгенерировать видео", callback_data="suggest:generate:video")
+            ]])
+            try:
+                await sent_msg.edit_reply_markup(reply_markup=keyboard)
+            except Exception as e:
+                logger.warning("Failed to edit reply markup for video suggestion: %s", e)
 
 # ---------------------------------------------------------------------------
 # Инлайн-режим
@@ -3818,6 +3926,7 @@ def main() -> None:
     app.add_handler(CommandHandler("think",    cmd_think))
     app.add_handler(CommandHandler("image",    cmd_image))
     app.add_handler(CommandHandler("generate", cmd_image))
+    app.add_handler(CommandHandler("video",    cmd_video))
     app.add_handler(CommandHandler("automate", cmd_automate))
     app.add_handler(CommandHandler("premium",  cmd_premium))
     app.add_handler(CommandHandler("grant_premium", cmd_grant_premium))
