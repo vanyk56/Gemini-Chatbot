@@ -2890,7 +2890,7 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post("https://openrouter.ai/api/v1/videos", json=payload, headers=headers)
-            if resp.status_code != 200:
+            if resp.status_code not in (200, 202):
                 raise ValueError(f"HTTP {resp.status_code}: {resp.text}")
             resp_data = resp.json()
             job_id = resp_data.get("id")
