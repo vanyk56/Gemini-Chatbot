@@ -1249,10 +1249,17 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
 
     try:
+        display_prompt = prompt
+        if len(display_prompt) > 450:
+            display_prompt = display_prompt[:450] + "..."
+        display_english = english_prompt
+        if len(display_english) > 450:
+            display_english = display_english[:450] + "..."
+
         with open(tmp_path, "rb") as f:
             await msg.reply_photo(
                 photo=f,
-                caption=f"🎨 <b>Запрос:</b> {prompt}\n🇬🇧 <b>Промпт:</b> {english_prompt}",
+                caption=f"🎨 <b>Запрос:</b> {display_prompt}\n🇬🇧 <b>Промпт:</b> {display_english}",
                 parse_mode=ParseMode.HTML
             )
     except Exception as e:
@@ -2925,10 +2932,14 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
             await status_msg.edit_text("⏳ <b>Видео сгенерировано! Отправляю...</b>", parse_mode=ParseMode.HTML)
 
+            display_prompt = prompt
+            if len(display_prompt) > 700:
+                display_prompt = display_prompt[:700] + "..."
+
             balance_left_str = "♾️ (Владелец)" if is_owner else f"{user_video_limits[user_id]} видео"
             caption = (
                 f"🎥 <b>Видео готово!</b>\n\n"
-                f"📝 Промпт: <i>{prompt}</i>\n"
+                f"📝 Промпт: <i>{display_prompt}</i>\n"
                 f"🤖 Модель: <b>{model_display}</b>\n\n"
                 f"💰 Остаток баланса: <b>{balance_left_str}</b>"
             )
@@ -2942,7 +2953,8 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             except Exception as send_err:
                 logger.info("Ошибка отправки видео по ссылке, пробуем скачать и отправить: %s", send_err)
-                file_resp = await client.get(video_url)
+                download_headers = headers if "openrouter.ai" in video_url else {}
+                file_resp = await client.get(video_url, headers=download_headers)
                 if file_resp.status_code == 200:
                     video_bytes = file_resp.content
                     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
