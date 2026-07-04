@@ -2887,18 +2887,15 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "prompt": prompt
     }
 
-    import aiohttp
-
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://openrouter.ai/api/v1/videos", json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    resp_txt = await resp.text()
-                    raise ValueError(f"HTTP {resp.status}: {resp_txt}")
-                resp_data = await resp.json()
-                job_id = resp_data.get("id")
-                if not job_id:
-                    raise ValueError(resp_data.get("error", {}).get("message", "Не удалось запустить задачу генерации."))
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post("https://openrouter.ai/api/v1/videos", json=payload, headers=headers)
+            if resp.status_code != 200:
+                raise ValueError(f"HTTP {resp.status_code}: {resp.text}")
+            resp_data = resp.json()
+            job_id = resp_data.get("id")
+            if not job_id:
+                raise ValueError(resp_data.get("error", {}).get("message", "Не удалось запустить задачу генерации."))
 
             # Поллинг статуса
             poll_interval = 10
@@ -2907,21 +2904,21 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
             for attempt in range(max_attempts):
                 await asyncio.sleep(poll_interval)
-                async with session.get(f"https://openrouter.ai/api/v1/videos/{job_id}", headers=headers) as status_resp:
-                    if status_resp.status == 200:
-                        job_data = await status_resp.json()
-                        status = job_data.get("status")
-                        if status == "completed":
-                            if "unsigned_urls" in job_data and job_data["unsigned_urls"]:
-                                video_url = job_data["unsigned_urls"][0]
-                            elif "output" in job_data and isinstance(job_data["output"], dict):
-                                video_url = job_data["output"].get("url")
-                            break
-                        elif status == "failed":
-                            err_msg = job_data.get("error", {}).get("message", "Задача завершилась с ошибкой.")
-                            raise ValueError(err_msg)
-                    else:
-                        logger.warning("Не удалось проверить статус %s: HTTP %d", job_id, status_resp.status)
+                status_resp = await client.get(f"https://openrouter.ai/api/v1/videos/{job_id}", headers=headers)
+                if status_resp.status_code == 200:
+                    job_data = status_resp.json()
+                    status = job_data.get("status")
+                    if status == "completed":
+                        if "unsigned_urls" in job_data and job_data["unsigned_urls"]:
+                            video_url = job_data["unsigned_urls"][0]
+                        elif "output" in job_data and isinstance(job_data["output"], dict):
+                            video_url = job_data["output"].get("url")
+                        break
+                    elif status == "failed":
+                        err_msg = job_data.get("error", {}).get("message", "Задача завершилась с ошибкой.")
+                        raise ValueError(err_msg)
+                else:
+                    logger.warning("Не удалось проверить статус %s: HTTP %d", job_id, status_resp.status_code)
 
             if not video_url:
                 raise TimeoutError("Превышено время ожидания генерации видео (5 минут).")
@@ -2945,27 +2942,27 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             except Exception as send_err:
                 logger.info("Ошибка отправки видео по ссылке, пробуем скачать и отправить: %s", send_err)
-                async with session.get(video_url) as file_resp:
-                    if file_resp.status == 200:
-                        video_bytes = await file_resp.read()
-                        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-                            tmp.write(video_bytes)
-                            tmp_path = tmp.name
+                file_resp = await client.get(video_url)
+                if file_resp.status_code == 200:
+                    video_bytes = file_resp.content
+                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                        tmp.write(video_bytes)
+                        tmp_path = tmp.name
+                    try:
+                        with open(tmp_path, "rb") as video_file:
+                            await context.bot.send_video(
+                                chat_id=update.effective_chat.id,
+                                video=video_file,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML
+                            )
+                    finally:
                         try:
-                            with open(tmp_path, "rb") as video_file:
-                                await context.bot.send_video(
-                                    chat_id=update.effective_chat.id,
-                                    video=video_file,
-                                    caption=caption,
-                                    parse_mode=ParseMode.HTML
-                                )
-                        finally:
-                            try:
-                                os.unlink(tmp_path)
-                            except Exception:
-                                pass
-                    else:
-                        raise send_err
+                            os.unlink(tmp_path)
+                        except Exception:
+                            pass
+                else:
+                    raise send_err
 
             await status_msg.delete()
 
