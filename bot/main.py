@@ -662,7 +662,12 @@ def _load_state() -> None:
     if BUSINESS_CONN_FILE.exists():
         try:
             data = json.loads(BUSINESS_CONN_FILE.read_text(encoding="utf-8"))
-            business_connections = {k: int(v) for k, v in data.items()}
+            business_connections = {}
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    business_connections[k] = {"user_id": int(v["user_id"]), "username": v.get("username")}
+                else:
+                    business_connections[k] = int(v)
             logger.info("Загружено бизнес-подключений: %d", len(business_connections))
         except Exception as e:
             logger.warning("Не удалось загрузить бизнес-подключения: %s", e)
@@ -1485,7 +1490,8 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         conn_id = update.message.business_connection_id
 
     if not conn_id:
-        for cid, uid in business_connections.items():
+        for cid, val in business_connections.items():
+            uid = val.get("user_id") if isinstance(val, dict) else val
             if uid == user.id:
                 conn_id = cid
                 break
@@ -2355,7 +2361,7 @@ async def handle_business_connection(update: Update, context: ContextTypes.DEFAU
     was_connected = conn.id in business_connections
 
     if conn.is_enabled:
-        business_connections[conn.id] = user_id
+        business_connections[conn.id] = {"user_id": user_id, "username": conn.user.username}
         _save_business_connections()
         logger.info("Business подключение: user=%d conn_id=%s", user_id, conn.id)
         try:
@@ -2401,13 +2407,20 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         return
 
     conn_id = msg.business_connection_id
-    owner_id = business_connections.get(conn_id)
+    owner_data = business_connections.get(conn_id)
+    owner_username = None
+    if isinstance(owner_data, dict):
+        owner_id = owner_data.get("user_id")
+        owner_username = owner_data.get("username")
+    else:
+        owner_id = owner_data
 
     if owner_id is None:
         try:
             conn = await context.bot.get_business_connection(conn_id)
             owner_id = conn.user.id
-            business_connections[conn_id] = owner_id
+            owner_username = conn.user.username
+            business_connections[conn_id] = {"user_id": owner_id, "username": owner_username}
             _save_business_connections()
             logger.info("Восстановлено business подключение: user=%d conn_id=%s", owner_id, conn_id)
         except Exception as e:
@@ -2470,7 +2483,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # Проверяем наличие Premium-подписки у владельца бизнес-аккаунта
-    owner_user = SimpleUser(owner_id)
+    owner_user = SimpleUser(owner_id, owner_username)
     if not is_premium_user(owner_user):
         return
 
@@ -3088,7 +3101,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 dt = datetime.fromisoformat(run_at_str)
 
                 conn_id = None
-                for cid, uid in business_connections.items():
+                for cid, val in business_connections.items():
+                    uid = val.get("user_id") if isinstance(val, dict) else val
                     if uid == user_id:
                         conn_id = cid
                         break
@@ -3737,7 +3751,8 @@ async def handle_http_request(reader, writer):
             dt = datetime.fromisoformat(run_at_str)
             
             conn_id = None
-            for cid, uid in business_connections.items():
+            for cid, val in business_connections.items():
+                uid = val.get("user_id") if isinstance(val, dict) else val
                 if uid == user_id:
                     conn_id = cid
                     break
