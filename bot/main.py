@@ -2998,7 +2998,7 @@ async def handle_video_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # ---------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, override_text: str = None) -> None:
     user_id = update.effective_user.id
-    user_text = override_text if override_text is not None else (update.message.text or "")
+    user_text = override_text if override_text is not None else (update.message.text or update.message.caption or "")
 
     # Проверяем состояние ожидания ввода ( think / image / scheduler )
     state = user_state.pop(user_id, None)
@@ -3351,9 +3351,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         bot_username = (context.bot.username or "").lower()
         msg = update.message
 
+        msg_text = msg.text or msg.caption or ""
+        msg_entities = msg.entities or msg.caption_entities or []
         mentioned = any(
-            msg.text[e.offset: e.offset + e.length].lstrip("@").lower() == bot_username
-            for e in (msg.entities or [])
+            msg_text[e.offset: e.offset + e.length].lstrip("@").lower() == bot_username
+            for e in msg_entities
             if e.type == "mention"
         )
         replying_to_bot = bool(
@@ -3977,7 +3979,7 @@ def main() -> None:
         filters.ChatType.GROUPS & (filters.Entity("mention") | filters.REPLY)
     )
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | _group_mention_filter),
+        (filters.TEXT | filters.CAPTION) & ~filters.COMMAND & (filters.ChatType.PRIVATE | _group_mention_filter),
         handle_message,
     ))
 
