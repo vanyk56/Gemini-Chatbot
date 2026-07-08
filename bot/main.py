@@ -763,14 +763,34 @@ SYSTEM_PROMPT_IMAGE = (
     "Отвечай на языке вопроса или подписи к изображению. " + _NO_LATEX
 )
 
-def build_business_prompt(persona: str) -> str:
+def build_business_prompt(persona: str, style: str = "casual") -> str:
+    style_instruction = ""
+    if style == "formal":
+        style_instruction = (
+            "Соблюдай строгие правила орфографии и пунктуации. Всегда начинай предложения с заглавной буквы, "
+            "ставь точки в конце. Используй правильный, грамотный русский язык."
+        )
+    elif style == "slang":
+        style_instruction = (
+            "Пиши как обычный человек в личной переписке Telegram: пиши простыми словами и исключительно СТРОЧНЫМИ (маленькими) буквами, "
+            "НЕ соблюдай строгие правила орфографии и пунктуации (допускается опускать запятые там, где они не влияют на смысл). "
+            "НИКОГДА НЕ ставь точки в конце предложений и сообщений. Вместо графических смайликов-эмодзи используй текстовые скобочки "
+            "(например, ')' или ')))' для радости, '(' для грусти, 'хд' или 'ахах' для смеха). "
+            "Используй типичные разговорные сокращения (например: 'че', 'ща', 'норм', 'щас', 'пж', 'спс')."
+        )
+    else: # casual
+        style_instruction = (
+            "Пиши естественно, дружелюбно, простым разговорным языком. Соблюдай базовую пунктуацию, "
+            "но не будь слишком формальным. Используй стандартные эмодзи."
+        )
+
     base = (
         "Ты отвечаешь на сообщения от имени человека в Telegram. "
         "Пиши естественно, по-человечески — как обычный живой собеседник, не как робот. "
         "Отвечай коротко и по делу, без лишних слов. "
-        "Используй разговорный стиль, иногда сленг если уместно. "
         "Не раскрывай что ты ИИ. "
         "Пиши на том же языке, что и собеседник. "
+        f"ВАЖНОЕ ТРЕБОВАНИЕ К СТИЛЮ НАПИСАНИЯ: {style_instruction}\n"
         + _NO_LATEX
     )
     if persona:
@@ -968,18 +988,25 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------------------------------------------------------------------------
 # /settings
 # ---------------------------------------------------------------------------
-def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str, channel_label: str) -> str:
+def get_settings_text(prem_status: str, mode_label: str, auto_label: str, max_h: int, persona_label: str, channel_label: str, style_label: str = "😊 Дружелюбный") -> str:
     return (
         "⚙️ <b>НАСТРОЙКИ БОТА SYNAPSE</b>\n\n"
         f"👑 <b>Подписка Premium:</b> {prem_status}\n"
         f"🤖 <b>Активный режим ИИ:</b> <b>{mode_label}</b>\n"
         f"🔄 <b>Автоответ в бизнес-чатах:</b> <b>{auto_label}</b>\n"
+        f"💬 <b>Стиль автоответа:</b> <b>{style_label}</b>\n"
         f"📝 <b>Лимит памяти диалога:</b> <b>{max_h} сообщений</b>\n"
         f"📢 <b>Канал для публикаций:</b> <b>{channel_label}</b>\n"
         f"🎭 <b>Роль автоответчика:</b> <i>{persona_label}</i>\n\n"
         "ℹ️ <b>SYNAPSE AGENT:</b> Вы можете запустить автономного агента, нажав на кнопку <b>Agent</b> рядом с полем ввода сообщения в этом чате.\n\n"
         "💡 <i>Используйте команду /persona для настройки уникальной роли автоответчика.</i>"
     )
+
+STYLE_LABELS = {
+    "formal": "💼 Грамотный",
+    "casual": "😊 Дружелюбный",
+    "slang": "⚡️ Живой (без правил)"
+}
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -992,6 +1019,9 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     channel = settings.get("publish_channel", "")
     channel_label = channel if channel else "не задан"
 
+    style = settings.get("auto_reply_style", "casual")
+    style_label = STYLE_LABELS.get(style, "😊 Дружелюбный")
+
     mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
     is_prem = is_premium_user(user)
     auto_active = auto if is_prem else False
@@ -1000,7 +1030,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     prem_status = "Активна 👑" if is_prem else "Не активна ❌"
 
-    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
+    text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label, style_label)
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -1017,6 +1047,9 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 callback_data="settings:auto_reply:toggle",
             ),
             InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
+        ],
+        [
+            InlineKeyboardButton(f"🎭 Стиль автоответа: {style_label}", callback_data="settings:style_menu"),
         ],
         [
             InlineKeyboardButton("📝 10", callback_data="settings:max_history:10"),
@@ -2139,12 +2172,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         channel_label = channel if channel else "не задан"
 
         auto_active = auto if is_prem else False
+        style = settings.get("auto_reply_style", "casual")
+        style_label = STYLE_LABELS.get(style, "😊 Дружелюбный")
 
         mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto_active else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label, style_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -2154,6 +2189,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto_active else '❌'}", callback_data="settings:auto_reply:toggle"),
                 InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
+            ],
+            [
+                InlineKeyboardButton(f"🎭 Стиль автоответа: {style_label}", callback_data="settings:style_menu"),
             ],
             [
                 InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
@@ -2219,6 +2257,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer(f"Режим изменен на {label}")
         return
 
+    if data == "settings:style_menu":
+        await query.answer()
+        settings = get_settings(user_id)
+        current_style = settings.get("auto_reply_style", "casual")
+        
+        btn_formal = "💼 Грамотный ✅" if current_style == "formal" else "💼 Грамотный"
+        btn_casual = "😊 Дружелюбный ✅" if current_style == "casual" else "😊 Дружелюбный"
+        btn_slang = "⚡️ Живой (без правил) ✅" if current_style == "slang" else "⚡️ Живой (без правил)"
+        
+        text = (
+            "🎭 <b>ВЫБОР СТИЛЯ АВТООТВЕТЧИКА</b>\n\n"
+            "Выберите стиль, в котором ИИ-автоответчик будет общаться в чатах:\n\n"
+            "💼 <b>Грамотный</b>: Правильная орфография, пунктуация, заглавные буквы, точки.\n"
+            "😊 <b>Дружелюбный</b>: Обычный разговорный стиль, умеренно вежливый.\n"
+            "⚡️ <b>Живой (без правил)</b>: Пишет строчными буквами, опускает запятые и точки в конце, использует текстовые скобочки <code>)</code> вместо эмодзи, сокращения (норм, ща, че)."
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(btn_formal, callback_data="settings:auto_reply_style:formal")],
+            [InlineKeyboardButton(btn_casual, callback_data="settings:auto_reply_style:casual")],
+            [InlineKeyboardButton(btn_slang, callback_data="settings:auto_reply_style:slang")],
+            [InlineKeyboardButton("⬅️ Назад в настройки", callback_data="action:settings")]
+        ])
+        
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
+
     if data.startswith("settings:"):
         parts = data.split(":")
         key = parts[1]
@@ -2243,6 +2308,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _save_settings()
             status = "включен" if settings["auto_reply"] else "выключен"
             await query.answer(f"Авто-ответ {status}.")
+        elif key == "auto_reply_style" and val:
+            settings["auto_reply_style"] = val
+            _save_settings()
+            style_name = {"formal": "Грамотный", "casual": "Дружелюбный", "slang": "Живой (без правил)"}.get(val, val)
+            await query.answer(f"Стиль изменен на {style_name}.")
         elif key == "max_history" and val:
             settings["max_history"] = int(val)
             _save_settings()
@@ -2260,12 +2330,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         channel_label = channel if channel else "не задан"
 
         auto_active = auto if is_prem else False
+        style = settings.get("auto_reply_style", "casual")
+        style_label = STYLE_LABELS.get(style, "😊 Дружелюбный")
 
         mode_label = {"default": "💬 Gemini", "claude": "🎭 Claude"}.get(mode, mode)
         auto_label = "✅ Вкл" if auto_active else "❌ Выкл"
         persona_label = (persona[:40] + "...") if len(persona) > 40 else (persona or "не задана")
 
-        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label)
+        text = get_settings_text(prem_status, mode_label, auto_label, max_h, persona_label, channel_label, style_label)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -2275,6 +2347,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             [
                 InlineKeyboardButton(f"🔄 Авто-ответ: {'✅' if auto_active else '❌'}", callback_data="settings:auto_reply:toggle"),
                 InlineKeyboardButton("📢 Настроить канал", callback_data="settings:channel:edit"),
+            ],
+            [
+                InlineKeyboardButton(f"🎭 Стиль автоответа: {style_label}", callback_data="settings:style_menu"),
             ],
             [
                 InlineKeyboardButton("📝 История: 10", callback_data="settings:max_history:10"),
@@ -2526,7 +2601,8 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         persona = owner_settings.get("persona", "")
-        system_prompt = build_business_prompt(persona)
+        style = owner_settings.get("auto_reply_style", "casual")
+        system_prompt = build_business_prompt(persona, style)
 
         # Для автоматизации используем google/gemini-2.5-flash-lite через OpenRouter
         if os.environ.get("OPENROUTER_API_KEY"):
