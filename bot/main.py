@@ -1195,7 +1195,7 @@ async def handle_image_logic(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 translation = await call_external_llm("openrouter", "anthropic/claude-sonnet-5", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
             else:
                 if os.environ.get("OPENROUTER_API_KEY"):
-                    translation = await call_external_llm("openrouter", "google/gemini-2.5-flash-lite", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
+                    translation = await call_external_llm("openrouter", "qwen/qwen3.7-flash", [{"role": "user", "parts": [{"text": translation_prompt}]}], stream=False, max_tokens=150)
                 else:
                     response = gemini_generate([{"role": "user", "parts": [{"text": translation_prompt}]}], types.GenerateContentConfig(max_output_tokens=256))
                     translation = response.text
@@ -2608,7 +2608,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         if os.environ.get("OPENROUTER_API_KEY"):
             reply_text = await call_external_llm(
                 provider="openrouter",
-                model="google/gemini-2.5-flash-lite",
+                model="qwen/qwen3.7-flash",
                 history=biz_history,
                 system_instruction=system_prompt,
                 stream=False,
@@ -3284,7 +3284,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         else:
             if os.environ.get("OPENROUTER_API_KEY"):
                 provider = "openrouter"
-                model = "google/gemini-2.5-flash-lite"
+                model = "qwen/qwen3.7-flash"
             else:
                 provider = "gemini"
                 model = MODEL
@@ -3496,7 +3496,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     else:
         if os.environ.get("OPENROUTER_API_KEY"):
             provider = "openrouter"
-            model = "google/gemini-2.5-flash-lite"
+            model = "qwen/qwen3.7-flash"
         else:
             provider = "gemini"
             model = MODEL
@@ -3602,7 +3602,7 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if os.environ.get("OPENROUTER_API_KEY"):
                 answer_raw = await call_external_llm(
                     provider="openrouter",
-                    model="google/gemini-2.5-flash-lite",
+                    model="qwen/qwen3.7-flash",
                     history=[{"role": "user", "parts": [{"text": user_text}]}],
                     system_instruction=SYSTEM_PROMPT_DEFAULT,
                     stream=False,
